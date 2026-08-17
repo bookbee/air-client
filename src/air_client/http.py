@@ -80,8 +80,10 @@ def display_headers(headers: dict[str, str], *, reveal: bool = False) -> dict[st
 def build_headers(api_key: str, extra: dict[str, str] | None = None) -> dict[str, str]:
     """The standard header set: JSON in, JSON out, plus a correlation id.
 
-    ``X-API-Key`` is the header air-classifier authenticates on; it is omitted
-    entirely when blank so the service's ALLOW_UNAUTHENTICATED dev mode works.
+    ``X-API-Key`` is the header the AIR services authenticate on. A blank key
+    omits it rather than sending an empty one, so the failure is the service's
+    own "no key presented" 401 — which is the thing you wanted to see — instead
+    of a header that looks present and is not.
     """
     headers = {"Content-Type": "application/json", "Accept": "application/json"}
     if api_key.strip():

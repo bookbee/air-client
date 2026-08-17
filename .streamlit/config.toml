@@ -1,13 +1,41 @@
+# Streamlit's own chrome — widgets, sidebar, dataframes, code blocks.
+#
+# `theme.base` is deliberately NOT set. Without it Streamlit follows the
+# browser's prefers-color-scheme, and the console's own stylesheet
+# (src/air_client/theme.py) follows the same signal, so the two can never
+# disagree. Both palettes are declared in full below rather than left to
+# Streamlit's defaults, so the accents match the ones the console draws.
+#
+# To force a mode for a whole session, chrome included:  make run THEME=dark
+# To switch inside a running app:  the sidebar's Appearance control.
+
 [theme]
-base = "light"
+font = "sans serif"
+
+[theme.light]
 primaryColor = "#1a73e8"
 backgroundColor = "#ffffff"
 secondaryBackgroundColor = "#f8f9fa"
 textColor = "#202124"
-font = "sans serif"
+borderColor = "#dadce0"
+codeBackgroundColor = "#f1f3f4"
+
+[theme.dark]
+# Google's dark-mode accents: the light hues fail contrast on a dark surface.
+primaryColor = "#8ab4f8"
+backgroundColor = "#0e1117"
+secondaryBackgroundColor = "#171a21"
+textColor = "#e6e8eb"
+borderColor = "#2c313a"
+codeBackgroundColor = "#161a21"
 
 [server]
 headless = true
+# Re-run the script when a source file is saved, instead of waiting for a click
+# on "Rerun". This lives here rather than in a launch flag so that every way of
+# starting the console behaves the same — `streamlit run`, `make run` and
+# `docker compose up` all read this file. Override once with `make run RELOAD=false`.
+runOnSave = true
 
 [browser]
 gatherUsageStats = false

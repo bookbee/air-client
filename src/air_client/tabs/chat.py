@@ -23,8 +23,8 @@ from typing import Any
 
 import streamlit as st
 
-from air_client.components import response_view
-from air_client.components.sidebar import Connection
+from air_client.components import response_view, target_bar
+from air_client.connection import Connection
 from air_client.http import build_headers, join_url, send
 from air_client.state import current, remember
 from air_client.theme import note, section
@@ -150,7 +150,8 @@ def _endpoint_row(connection: Connection) -> tuple[str, str]:
     )
     cols[3].button("Load", key="chat-load", width="stretch", on_click=_apply_preset, args=(chosen,))
 
-    st.caption(f"{method} {join_url(connection.base_url, path)}")
+    marker = ":orange[REMOTE]" if connection.is_remote else ":blue[LOCAL]"
+    st.caption(f"{marker} · `{method} {join_url(connection.base_url, path)}`")
     return method, path
 
 
@@ -236,6 +237,7 @@ def render(connection: Connection) -> None:
         "Exercise the conversational endpoint on **air-platform**. You drive the "
         "method, path, headers and body; the console handles auth, timing and rendering."
     )
+    target_bar.caption(connection)
     st.info(
         "air-platform currently ships only a README — no chat service exists yet. This tab "
         "is deliberately contract-agnostic so it works the day the endpoint appears. "
@@ -316,7 +318,7 @@ def render(connection: Connection) -> None:
         st.warning(problem)
 
     if clicked:
-        with st.spinner("Calling air-platform…"):
+        with st.spinner(f"Calling air-platform on {connection.target}…"):
             exchange = send(
                 method,
                 join_url(connection.base_url, path),

@@ -1,0 +1,51 @@
+# air-client — the console, containerised for machines without Python 3.12.
+#
+# Unlike its siblings, this file deliberately does NOT join air-infra's `air-net`
+# and does not require air-infra to be up. The console's job is to reach whatever
+# environment is under test — usually a remote one — so making it depend on a
+# local stack would break the common case to serve the rare one. It reaches
+# locally-run AIR services through the ports they publish on the host, which
+# works whether those run natively or in their own containers.
+name: air-client
+
+services:
+  air-client:
+    build:
+      context: .
+      target: runtime
+    image: air-client:local
+    ports:
+      # Bound to loopback deliberately. The console holds API keys for whichever
+      # environment you point it at; it is a tool on your machine, not a service
+      # for the network to reach.
+      - "127.0.0.1:${AIR_CLIENT_PORT:-8501}:8501"
+
+    # `host.docker.internal` is the machine running Docker. Docker Desktop
+    # provides it; this mapping is what makes it work on Linux too.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+    environment:
+      # Inside a container, 127.0.0.1 is the container. The `local` target is
+      # therefore re-pointed at the Docker host, so "local" keeps meaning
+      # "the services on my laptop" rather than silently meaning nothing.
+      #
+      # Docker Desktop (macOS, Windows) proxies this to the host and reaches
+      # even a service bound to the host's 127.0.0.1 — verified against
+      # air-classifier on :8082. On Linux, host-gateway resolves to the host's
+      # docker0 address, which a loopback-bound service does *not* answer on:
+      # start it with `make run HOST=0.0.0.0` there.
+      AIR_CLIENT__TARGET: local
+      AIR_CLIENT__TARGETS__LOCAL__LABEL: Local — services on the Docker host
+      AIR_CLIENT__TARGETS__LOCAL__CLASSIFIER_BASE_URL: http://host.docker.internal:8082
+      AIR_CLIENT__TARGETS__LOCAL__CLASSIFIER_API_KEY: airc_local_dev_key
+      AIR_CLIENT__TARGETS__LOCAL__PLATFORM_BASE_URL: http://host.docker.internal:8081
+
+    # Remote targets and real keys come from an untracked .env, which is never
+    # baked into the image (.dockerignore). `environment:` above wins over it,
+    # so the local target keeps pointing at the host whatever the file says.
+    env_file:
+      - path: .env
+        required: false
+
+    restart: unless-stopped

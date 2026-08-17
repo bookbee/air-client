@@ -3,6 +3,10 @@
 Run with `make run`, or directly:
 
     streamlit run src/air_client/app.py
+
+The console is a local tool: it is cloned and run on the tester's own machine
+and pointed at whichever AIR deployment is under test. So the first thing drawn
+under the title, before any tab, is where it is currently pointing.
 """
 
 from __future__ import annotations
@@ -18,9 +22,9 @@ if __package__ in (None, ""):  # pragma: no cover - import bootstrap
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from air_client import theme
-from air_client.components import sidebar
+from air_client.components import sidebar, target_bar
 from air_client.config import load_defaults
-from air_client.tabs import chat, sentiment, system
+from air_client.tabs import chat, classifier, system
 
 
 def main() -> None:
@@ -30,19 +34,23 @@ def main() -> None:
         layout="wide",
         initial_sidebar_state="expanded",
     )
-    theme.inject()
+    # Defaults first: the appearance mode lives in them, and the stylesheet has
+    # to be injected before anything it styles is drawn.
+    defaults = load_defaults()
+    theme.inject(theme.resolve_mode(defaults.theme))
     theme.header(
         "AIR Console",
-        "A developer's bench for the AIR services — send a request, read the response.",
+        "A developer's bench for the AIR services — send a request, read the response. "
+        "Runs on your machine against whichever environment you select.",
     )
 
-    defaults = load_defaults()
     classifier_conn, platform_conn = sidebar.render(defaults)
+    target_bar.render(classifier_conn, platform_conn)
 
-    sentiment_tab, chat_tab, system_tab = st.tabs(["Sentiment", "Chat", "System"])
+    classifier_tab, chat_tab, system_tab = st.tabs(["Classifier", "Chat", "System"])
 
-    with sentiment_tab:
-        sentiment.render(classifier_conn)
+    with classifier_tab:
+        classifier.render(classifier_conn)
     with chat_tab:
         chat.render(platform_conn)
     with system_tab:

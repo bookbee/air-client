@@ -4,16 +4,22 @@ The first question when a request misbehaves is nearly always "is the thing even
 up, and which tiers are actually loaded?". `/v1/capabilities` answers the second
 directly — without a local Ollama the ladder silently stops at t1, and this is
 where you see that rather than inferring it from a trace.
+
+It answers a third question too, and on a shared environment that is often the
+important one: *which build am I testing*. Version, tier inventory and batch
+ceiling all come from the environment you are pointed at, not from this repo, so
+a QA result is only meaningful next to the capabilities that produced it.
 """
 
 from __future__ import annotations
 
+import json
 from typing import Any
 
 import streamlit as st
 
-from air_client.components import response_view
-from air_client.components.sidebar import Connection
+from air_client.components import response_view, target_bar
+from air_client.connection import Connection
 from air_client.http import build_headers, join_url, send
 from air_client.state import current, history, remember
 from air_client.theme import section
@@ -23,6 +29,21 @@ PROBES = {
     "Readiness": "/v1/ready",
     "Capabilities": "/v1/capabilities",
 }
+
+
+def _detail(value: Any) -> str:
+    """Flatten a tier's ``detail`` object into one readable cell.
+
+    It arrives as a small map — `scorer_kind`, `onnx_loaded`, the languages a
+    rung covers — and a table cell holding a raw dict is both unreadable and
+    unsortable, so it becomes `key=value` pairs instead.
+    """
+    if isinstance(value, dict):
+        return ", ".join(
+            f"{key}={json.dumps(item) if isinstance(item, list | dict) else item}"
+            for key, item in value.items()
+        )
+    return str(value) if value else ""
 
 
 def _capabilities_summary(payload: Any) -> None:
@@ -45,7 +66,7 @@ def _capabilities_summary(payload: Any) -> None:
                     "enabled": t.get("enabled"),
                     "available": t.get("available"),
                     "model version": t.get("model_version") or "—",
-                    "detail": t.get("detail") or "",
+                    "detail": _detail(t.get("detail")),
                 }
                 for t in tiers
                 if isinstance(t, dict)
@@ -89,63 +110,98 @@ def _probe_summary(name: str) -> Any:
     return lambda payload: st.json(payload)
 
 
+def _run_probe(connection: Connection, slot: str, name: str, path: str) -> None:
+    exchange = send(
+        "GET",
+        join_url(connection.base_url, path),
+        headers=build_headers(connection.api_key),
+        timeout=connection.timeout,
+        verify=connection.verify,
+    )
+    remember(slot, exchange)
+    st.session_state[f"{slot}-probe-name"] = name
+
+
+def _probe_panel(connection: Connection, slot: str) -> None:
+    """The probe buttons for one service, plus whatever the last one returned."""
+    target_bar.caption(connection)
+
+    disabled = not connection.base_url.strip()
+    cols = st.columns(len(PROBES) + 3)
+    for index, (name, path) in enumerate(PROBES.items()):
+        cols[index].button(
+            name,
+            key=f"{slot}-probe-{name}",
+            width="stretch",
+            disabled=disabled,
+            on_click=_run_probe,
+            args=(connection, slot, name, path),
+        )
+    if disabled:
+        st.caption(":red[No base URL set for this service in the sidebar.]")
+
+    stored = current(slot)
+    if stored is not None:
+        response_view.render(
+            stored,
+            key=slot,
+            summary=_probe_summary(str(st.session_state.get(f"{slot}-probe-name", "Health"))),
+        )
+
+
+def _rows() -> list[dict[str, Any]]:
+    return [
+        {
+            "method": e.method,
+            "url": e.url,
+            "status": e.status_code if e.error is None else "network error",
+            "ms": round(e.elapsed_ms),
+            "request id": e.request_id or "",
+        }
+        for e in history()
+    ]
+
+
 def _history_panel() -> None:
-    entries = history()
     section("Recent calls")
-    if not entries:
+    rows = _rows()
+    if not rows:
         st.caption("Nothing sent yet this session.")
         return
 
-    st.button(
+    st.caption(
+        "Every call this session made, newest first, whichever target it went to — "
+        "the full URL is the record of where."
+    )
+    cols = st.columns([1, 1, 4])
+    cols[0].button(
         "Clear history",
         key="clear-history",
+        width="stretch",
         on_click=lambda: st.session_state.update({"history": []}),
     )
-    st.dataframe(
-        [
-            {
-                "method": e.method,
-                "url": e.url,
-                "status": e.status_code if e.error is None else "network error",
-                "ms": round(e.elapsed_ms),
-                "request id": e.request_id or "",
-            }
-            for e in entries
-        ],
-        hide_index=True,
+    cols[1].download_button(
+        "Download log",
+        data=json.dumps(rows, indent=2),
+        file_name="air-console-history.json",
+        mime="application/json",
+        key="download-history",
         width="stretch",
+        help="Attach it to a defect report so the exact URLs and request ids travel with it.",
     )
+    st.dataframe(rows, hide_index=True, width="stretch")
 
 
 def render(classifier: Connection, platform: Connection) -> None:
     """Draw the system tab for both services."""
     st.markdown(
-        "Liveness, readiness and the tier inventory. Check here first when a request "
-        "behaves oddly — a rung that is enabled but unavailable explains most surprises."
+        "Liveness, readiness and the tier inventory for whichever environment the "
+        "sidebar is pointed at. Check here first when a request behaves oddly — a "
+        "rung that is enabled but unavailable explains most surprises."
     )
 
     section("air-classifier")
-    cols = st.columns(len(PROBES) + 2)
-    for index, (name, path) in enumerate(PROBES.items()):
-        if cols[index].button(name, key=f"probe-{name}", width="stretch"):
-            with st.spinner(f"GET {path}…"):
-                exchange = send(
-                    "GET",
-                    join_url(classifier.base_url, path),
-                    headers=build_headers(classifier.api_key),
-                    timeout=classifier.timeout,
-                    verify=classifier.verify,
-                )
-            remember("system-classifier", exchange)
-            st.session_state["system-probe-name"] = name
-
-    stored = current("system-classifier")
-    if stored is not None:
-        response_view.render(
-            stored,
-            key="system-classifier",
-            summary=_probe_summary(st.session_state.get("system-probe-name", "Health")),
-        )
+    _probe_panel(classifier, "system-classifier")
 
     st.divider()
 
@@ -154,22 +210,7 @@ def render(classifier: Connection, platform: Connection) -> None:
         "The same probes against the platform base URL. They will fail until the "
         "service exists — that is expected."
     )
-    cols = st.columns(len(PROBES) + 2)
-    for index, (name, path) in enumerate(PROBES.items()):
-        if cols[index].button(name, key=f"probe-platform-{name}", width="stretch"):
-            with st.spinner(f"GET {path}…"):
-                exchange = send(
-                    "GET",
-                    join_url(platform.base_url, path),
-                    headers=build_headers(platform.api_key),
-                    timeout=platform.timeout,
-                    verify=platform.verify,
-                )
-            remember("system-platform", exchange)
-
-    stored = current("system-platform")
-    if stored is not None:
-        response_view.render(stored, key="system-platform")
+    _probe_panel(platform, "system-platform")
 
     st.divider()
     _history_panel()

@@ -1,10 +1,23 @@
-"""The air-classifier tab: sentiment, feedback and review analysis.
+"""The air-classifier tab: all three classification routes.
 
-Three endpoints share one request envelope (`text` plus optional `context`,
-`metadata` and `options`) and add a few domain fields each, so the form is
-built once and specialised per domain.
+air-classifier answers one question — *what is this text saying, and how sure
+are we* — through a four-rung escalation ladder (`t0_rules` → `t1_classifier` →
+`t2_local_llm` → `t3_cloud_llm`). Every request enters at the cheapest rung and
+climbs only when the rung below is not confident enough, and the response says
+how far it climbed and why.
 
-Two details of the API shape drive the design here:
+The three routes are that same ladder, specialised:
+
+* ``/v1/sentiment`` — the base verdict, with no assumptions about where the text
+  came from.
+* ``/v1/feedback`` — the same verdict plus triage: how urgent, how actionable,
+  and which queue it belongs in.
+* ``/v1/reviews`` — the same verdict plus aspect-level scoring, and a check of
+  the prose against the star rating the author gave it.
+
+They share one request envelope (`text` plus optional `context`, `metadata` and
+`options`) and add a few domain fields each, so the form is built once and
+specialised per route. Two details of the API shape drive the design here:
 
 * Every request model sets ``additionalProperties: false``, so the console must
   send *only* fields the operator actually filled in. Blank inputs are omitted
@@ -18,13 +31,15 @@ Two details of the API shape drive the design here:
 
 from __future__ import annotations
 
+import html
 import json
+from dataclasses import dataclass
 from typing import Any
 
 import streamlit as st
 
-from air_client.components import response_view, summary
-from air_client.components.sidebar import Connection
+from air_client.components import response_view, summary, target_bar
+from air_client.connection import Connection
 from air_client.http import build_headers, join_url, send
 from air_client.state import current, parse_json_object, remember
 from air_client.theme import note, section
@@ -32,11 +47,48 @@ from air_client.theme import note, section
 MAX_TEXT_CHARS = 20000
 TIERS = ["t0_rules", "t1_classifier", "t2_local_llm", "t3_cloud_llm"]
 
-DOMAINS = {
-    "Sentiment": "sentiment",
-    "Feedback": "feedback",
-    "Reviews": "reviews",
-}
+#: The service's own default ceiling on a batch. The schema allows 1000; the
+#: deployment you are pointed at almost certainly allows fewer. `/v1/capabilities`
+#: on the System tab reports the real number for that environment.
+DEFAULT_MAX_BATCH_ITEMS = 100
+
+
+@dataclass(frozen=True, slots=True)
+class Route:
+    """One classification endpoint, and why you would choose it."""
+
+    key: str
+    label: str
+    purpose: str
+    sends: str
+    returns: str
+
+
+ROUTES: tuple[Route, ...] = (
+    Route(
+        key="sentiment",
+        label="Sentiment",
+        purpose="The base verdict on any text, with no assumptions about its origin.",
+        sends="text, context, metadata",
+        returns="label, polarity, confidence, rationale, emotions",
+    ),
+    Route(
+        key="feedback",
+        label="Feedback",
+        purpose="Triage inbound product and support feedback: how loud is this, and who takes it?",
+        sends="+ channel, user_segment, subject",
+        returns="+ urgency, actionability, suggested_route",
+    ),
+    Route(
+        key="reviews",
+        label="Reviews",
+        purpose="Read marketplace reviews per aspect, and check the prose against the stars.",
+        sends="+ rating, rating_scale_max, product_id, verified_purchase",
+        returns="+ aspects, rating_consistency",
+    ),
+)
+
+BY_LABEL = {route.label: route for route in ROUTES}
 
 EXAMPLES: dict[str, list[tuple[str, str]]] = {
     "sentiment": [
@@ -57,6 +109,26 @@ EXAMPLES: dict[str, list[tuple[str, str]]] = {
         ("Glowing", "Five stars is not enough. Setup took two minutes and it just works."),
     ],
 }
+
+
+def _route_cards(selected: str) -> None:
+    """The three routes side by side, with the active one lit.
+
+    Worth the vertical space: the routes differ only in what they *add* to a
+    shared envelope, and that difference is invisible from the form alone.
+    """
+    columns = st.columns(len(ROUTES))
+    for column, route in zip(columns, ROUTES, strict=True):
+        with column:
+            st.markdown(
+                f'<div class="air-route {"on" if route.key == selected else ""}">'
+                f'<div class="air-route-path">POST /v1/{route.key}</div>'
+                f'<div class="air-route-what">{html.escape(route.purpose)}</div>'
+                f'<div class="air-route-adds">sends {html.escape(route.sends)}<br>'
+                f"returns {html.escape(route.returns)}</div>"
+                "</div>",
+                unsafe_allow_html=True,
+            )
 
 
 def _options_editor(prefix: str, *, show_aspects: bool) -> dict[str, Any]:
@@ -162,12 +234,12 @@ def _options_editor(prefix: str, *, show_aspects: bool) -> dict[str, Any]:
 
 
 def _envelope_fields(
-    prefix: str, domain: str
+    prefix: str, route: str
 ) -> tuple[str, dict[str, Any] | None, dict[str, Any] | None, list[str]]:
     """The `text`, `context` and `metadata` shared by all three endpoints."""
     errors: list[str] = []
 
-    examples = EXAMPLES.get(domain, [])
+    examples = EXAMPLES.get(route, [])
     if examples:
         cols = st.columns(len(examples) + 3)
         for index, (label, value) in enumerate(examples):
@@ -215,11 +287,11 @@ def _envelope_fields(
     return text, context, metadata, errors
 
 
-def _domain_fields(prefix: str, domain: str) -> dict[str, Any]:
+def _domain_fields(prefix: str, route: str) -> dict[str, Any]:
     """The handful of fields that only one endpoint accepts."""
     extras: dict[str, Any] = {}
 
-    if domain == "feedback":
+    if route == "feedback":
         section("Feedback fields")
         cols = st.columns(3)
         channel = cols[0].text_input(
@@ -238,7 +310,7 @@ def _domain_fields(prefix: str, domain: str) -> dict[str, Any]:
         if subject.strip():
             extras["subject"] = subject.strip()
 
-    elif domain == "reviews":
+    elif route == "reviews":
         section("Review fields")
         cols = st.columns([1, 1, 1, 1])
         send_rating = cols[0].checkbox("send rating", key=f"{prefix}-on-rating", value=True)
@@ -279,11 +351,35 @@ def _domain_fields(prefix: str, domain: str) -> dict[str, Any]:
     return extras
 
 
-def _single_form(domain: str, connection: Connection) -> None:
-    prefix = f"sent-{domain}-single"
-    text, context, metadata, errors = _envelope_fields(prefix, domain)
-    extras = _domain_fields(prefix, domain)
-    options = _options_editor(prefix, show_aspects=domain == "reviews")
+def _send_row(
+    prefix: str,
+    label: str,
+    url: str,
+    connection: Connection,
+    *,
+    errors: list[str],
+) -> bool:
+    """The Send button and, beside it, the exact destination it will hit."""
+    left, right = st.columns([1, 4])
+    clicked = left.button(
+        label, type="primary", key=f"{prefix}-send", width="stretch", disabled=bool(errors)
+    )
+    marker = "REMOTE" if connection.is_remote else "LOCAL"
+    right.markdown(
+        f'<div class="air-meta" style="padding-top:.55rem">POST {html.escape(url)} '
+        f'<span class="air-chip {connection.location}">{marker}</span></div>',
+        unsafe_allow_html=True,
+    )
+    for message in errors:
+        st.warning(message)
+    return clicked
+
+
+def _single_form(route: str, connection: Connection) -> None:
+    prefix = f"clf-{route}-single"
+    text, context, metadata, errors = _envelope_fields(prefix, route)
+    extras = _domain_fields(prefix, route)
+    options = _options_editor(prefix, show_aspects=route == "reviews")
 
     body: dict[str, Any] = {"text": text}
     body.update(extras)
@@ -300,25 +396,12 @@ def _single_form(domain: str, connection: Connection) -> None:
     with st.expander("Request body preview"):
         st.code(json.dumps(body, indent=2, ensure_ascii=False), language="json")
 
-    path = f"/v1/{domain}"
-    left, right = st.columns([1, 4])
-    clicked = left.button(
-        "Send", type="primary", key=f"{prefix}-send", width="stretch", disabled=bool(errors)
-    )
-    right.markdown(
-        f'<div class="air-meta" style="padding-top:.55rem">POST '
-        f"{join_url(connection.base_url, path)}</div>",
-        unsafe_allow_html=True,
-    )
-
-    for message in errors:
-        st.warning(message)
-
-    if clicked:
-        with st.spinner("Calling air-classifier…"):
+    url = join_url(connection.base_url, f"/v1/{route}")
+    if _send_row(prefix, "Send", url, connection, errors=errors):
+        with st.spinner(f"Calling air-classifier on {connection.target}…"):
             exchange = send(
                 "POST",
-                join_url(connection.base_url, path),
+                url,
                 headers=build_headers(connection.api_key),
                 json_body=body,
                 timeout=connection.timeout,
@@ -332,8 +415,8 @@ def _single_form(domain: str, connection: Connection) -> None:
         response_view.render(stored, key=prefix, summary=summary.render_analysis)
 
 
-def _batch_form(domain: str, connection: Connection) -> None:
-    prefix = f"sent-{domain}-batch"
+def _batch_form(route: str, connection: Connection) -> None:
+    prefix = f"clf-{route}-batch"
     errors: list[str] = []
 
     mode = st.radio(
@@ -375,14 +458,15 @@ def _batch_form(domain: str, connection: Connection) -> None:
                 else:
                     items = parsed
 
-    options = _options_editor(prefix, show_aspects=domain == "reviews")
+    options = _options_editor(prefix, show_aspects=route == "reviews")
 
     if not items:
         errors.insert(0, "Supply at least one item.")
-    if len(items) > 100:
+    if len(items) > DEFAULT_MAX_BATCH_ITEMS:
         st.warning(
-            f"{len(items)} items. The schema allows 1000, but the service's own "
-            "AIR_SENTIMENT__APP__MAX_BATCH_ITEMS defaults to 100 and will reject more."
+            f"{len(items)} items. The schema allows 1000, but a deployment's own batch "
+            f"ceiling defaults to {DEFAULT_MAX_BATCH_ITEMS} and rejects more. "
+            "The System tab's Capabilities probe reports the limit for this target."
         )
 
     body: dict[str, Any] = {"items": items}
@@ -393,25 +477,12 @@ def _batch_form(domain: str, connection: Connection) -> None:
     with st.expander("Request body preview"):
         st.code(json.dumps(body, indent=2, ensure_ascii=False)[:6000], language="json")
 
-    path = f"/v1/{domain}/batch"
-    left, right = st.columns([1, 4])
-    clicked = left.button(
-        "Send batch", type="primary", key=f"{prefix}-send", width="stretch", disabled=bool(errors)
-    )
-    right.markdown(
-        f'<div class="air-meta" style="padding-top:.55rem">POST '
-        f"{join_url(connection.base_url, path)}</div>",
-        unsafe_allow_html=True,
-    )
-
-    for message in errors:
-        st.warning(message)
-
-    if clicked:
-        with st.spinner(f"Analysing {len(items)} item(s)…"):
+    url = join_url(connection.base_url, f"/v1/{route}/batch")
+    if _send_row(prefix, "Send batch", url, connection, errors=errors):
+        with st.spinner(f"Analysing {len(items)} item(s) on {connection.target}…"):
             exchange = send(
                 "POST",
-                join_url(connection.base_url, path),
+                url,
                 headers=build_headers(connection.api_key),
                 json_body=body,
                 timeout=connection.timeout,
@@ -426,20 +497,22 @@ def _batch_form(domain: str, connection: Connection) -> None:
 
 
 def render(connection: Connection) -> None:
-    """Draw the whole sentiment tab."""
+    """Draw the whole classifier tab."""
     st.markdown(
-        "Analyse text through the escalation ladder. `/v1/sentiment` makes no domain "
-        "assumptions; `/v1/feedback` adds urgency and routing; `/v1/reviews` adds "
-        "aspects and rating consistency."
+        "Three routes onto one escalation ladder — `t0_rules` → `t1_classifier` → "
+        "`t2_local_llm` → `t3_cloud_llm`. Every request enters at the cheapest rung "
+        "and climbs only when the rung below is not confident enough; the response "
+        "says how far it climbed and why."
     )
+    target_bar.caption(connection)
 
     top = st.columns([2, 1])
     with top[0]:
-        domain_label = st.radio(
-            "Endpoint",
-            list(DOMAINS),
+        label = st.radio(
+            "Route",
+            list(BY_LABEL),
             horizontal=True,
-            key="sent-domain",
+            key="clf-route",
             label_visibility="collapsed",
         )
     with top[1]:
@@ -447,14 +520,15 @@ def render(connection: Connection) -> None:
             "Mode",
             ["Single", "Batch"],
             horizontal=True,
-            key="sent-mode",
+            key="clf-mode",
             label_visibility="collapsed",
         )
 
-    domain = DOMAINS[domain_label]
+    route = BY_LABEL[label].key
+    _route_cards(route)
     st.divider()
 
     if mode == "Single":
-        _single_form(domain, connection)
+        _single_form(route, connection)
     else:
-        _batch_form(domain, connection)
+        _batch_form(route, connection)

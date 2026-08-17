@@ -1,0 +1,18 @@
+# Secrets first: `.env` holds real keys for whichever environments this console
+# is pointed at, and must never be baked into an image. Compose passes it at
+# runtime through env_file instead.
+.env
+
+.venv/
+.run/
+.git/
+.github/
+.vscode/
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+__pycache__/
+*.py[codz]
+build/
+dist/
+*.egg-info/
