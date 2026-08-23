@@ -25,6 +25,10 @@ class Connection:
     api_key: str
     timeout: float
     verify: bool
+    #: air-platform's channel, when the service has them. It belongs to the key
+    #: rather than the request, so it is a property of the connection — not
+    #: something a tab can pass as a header.
+    channel: str = ""
 
     @property
     def location(self) -> str:
@@ -38,6 +42,11 @@ class Connection:
     @property
     def authenticated(self) -> bool:
         return bool(self.api_key.strip())
+
+    @property
+    def label(self) -> str:
+        """Service name, qualified by channel when there is one."""
+        return f"{self.service} · {self.channel}" if self.channel else self.service
 
     @property
     def host(self) -> str:

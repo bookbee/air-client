@@ -24,7 +24,7 @@ if __package__ in (None, ""):  # pragma: no cover - import bootstrap
 from air_client import theme
 from air_client.components import sidebar, target_bar
 from air_client.config import load_defaults
-from air_client.tabs import chat, classifier, system
+from air_client.tabs import classifier, llm, platform, system
 
 
 def main() -> None:
@@ -44,17 +44,21 @@ def main() -> None:
         "Runs on your machine against whichever environment you select.",
     )
 
-    classifier_conn, platform_conn = sidebar.render(defaults)
-    target_bar.render(classifier_conn, platform_conn)
+    classifier_conn, customer_conn, business_conn, llm_conn = sidebar.render(defaults)
+    target_bar.render(classifier_conn, customer_conn, business_conn, llm_conn)
 
-    classifier_tab, chat_tab, system_tab = st.tabs(["Classifier", "Chat", "System"])
+    classifier_tab, platform_tab, llm_tab, system_tab = st.tabs(
+        ["Classifier", "Platform", "LLM", "System"]
+    )
 
     with classifier_tab:
         classifier.render(classifier_conn)
-    with chat_tab:
-        chat.render(platform_conn)
+    with platform_tab:
+        platform.render(customer_conn, business_conn)
+    with llm_tab:
+        llm.render(llm_conn)
     with system_tab:
-        system.render(classifier_conn, platform_conn)
+        system.render(classifier_conn, customer_conn, business_conn, llm_conn)
 
 
 main()

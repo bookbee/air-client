@@ -49,11 +49,11 @@ def _probe(connection: Connection) -> dict[str, object]:
 
 def check_all(*connections: Connection) -> None:
     """Probe every connection's health endpoint and cache the verdicts."""
-    st.session_state[_RESULTS] = {c.service: _probe(c) for c in connections if c.base_url.strip()}
+    st.session_state[_RESULTS] = {c.label: _probe(c) for c in connections if c.base_url.strip()}
 
 
 def _reachability(connection: Connection) -> str:
-    result = st.session_state.get(_RESULTS, {}).get(connection.service)
+    result = st.session_state.get(_RESULTS, {}).get(connection.label)
     if not isinstance(result, dict):
         return '<span class="air-dot unknown"></span><span>not checked</span>'
     kind = "ok" if result.get("ok") else "err"
@@ -79,7 +79,7 @@ def _row(connection: Connection) -> str:
     )
     return (
         '<div class="air-target-row">'
-        f'<span class="air-target-service">{html.escape(connection.service)}</span>'
+        f'<span class="air-target-service">{html.escape(connection.label)}</span>'
         f"{chip}"
         f'<span class="air-target-url">{url}</span>'
         f"{key}"
@@ -88,9 +88,16 @@ def _row(connection: Connection) -> str:
     )
 
 
-def render(classifier: Connection, platform: Connection) -> None:
-    """Draw the target bar for both services, plus the probe control."""
-    remote = classifier.is_remote or platform.is_remote
+def render(*connections: Connection) -> None:
+    """Draw the target bar for every connection, plus the probe control."""
+    if not connections:
+        return
+    # Every connection in one render() call comes from the same selected
+    # Target (sidebar.py builds them all from it), so target_label is
+    # identical across all of them — any one will do, not specifically the
+    # first or "the classifier one".
+    target_label = connections[0].target_label
+    remote = any(c.is_remote for c in connections)
     tone = "remote" if remote else "local"
 
     left, right = st.columns([6, 1])
@@ -99,25 +106,25 @@ def render(classifier: Connection, platform: Connection) -> None:
             f'<div class="air-target {tone}">'
             f'<div class="air-target-head">'
             f'<span class="air-target-label">TARGET</span>'
-            f"<strong>{html.escape(classifier.target_label)}</strong>"
+            f"<strong>{html.escape(target_label)}</strong>"
             + (
                 '<span class="air-target-warn">requests leave this machine</span>'
                 if remote
                 else '<span class="air-target-warn">everything stays on this machine</span>'
             )
             + "</div>"
-            f"{_row(classifier)}{_row(platform)}"
-            "</div>",
+            + "".join(_row(c) for c in connections)
+            + "</div>",
             unsafe_allow_html=True,
         )
     with right:
         st.button(
-            "Check both",
+            "Check all",
             key="probe-all",
             width="stretch",
-            help=f"GET {HEALTH_PATH} against both base URLs and report what came back.",
+            help=f"GET {HEALTH_PATH} against each base URL and report what came back.",
             on_click=check_all,
-            args=(classifier, platform),
+            args=connections,
         )
 
 
@@ -129,6 +136,6 @@ def caption(connection: Connection) -> None:
     )
     key = "keyed" if connection.authenticated else ":red[no key]"
     st.caption(
-        f"{marker} · **{connection.service}** on `{connection.target}` · "
+        f"{marker} · **{connection.label}** on `{connection.target}` · "
         f"`{connection.base_url or '—'}` · {key}"
     )

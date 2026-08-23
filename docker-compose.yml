@@ -40,6 +40,10 @@ services:
       AIR_CLIENT__TARGETS__LOCAL__CLASSIFIER_BASE_URL: http://host.docker.internal:8082
       AIR_CLIENT__TARGETS__LOCAL__CLASSIFIER_API_KEY: airc_local_dev_key
       AIR_CLIENT__TARGETS__LOCAL__PLATFORM_BASE_URL: http://host.docker.internal:8081
+      AIR_CLIENT__TARGETS__LOCAL__PLATFORM_CUSTOMER_API_KEY: airp_local_customer_key
+      AIR_CLIENT__TARGETS__LOCAL__PLATFORM_BUSINESS_API_KEY: airp_local_business_key
+      AIR_CLIENT__TARGETS__LOCAL__LLM_BASE_URL: http://host.docker.internal:8083
+      AIR_CLIENT__TARGETS__LOCAL__LLM_API_KEY: air-client-dev
 
     # Remote targets and real keys come from an untracked .env, which is never
     # baked into the image (.dockerignore). `environment:` above wins over it,

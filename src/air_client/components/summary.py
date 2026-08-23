@@ -1,9 +1,18 @@
-"""Decoding an analysis response into something readable at a glance.
+"""Decoding a `/v1/classify` response into something readable at a glance.
 
-Every air-classifier response shares one envelope; feedback and reviews bolt
-extra blocks onto it. So the renderer walks the common shape first and then
-picks up whichever domain extras are present, which means it handles all three
-endpoints — and their batch forms — without branching on the route.
+One envelope for every request now — the old `/sentiment`, `/feedback` and
+`/reviews` split is gone — but the fields still fall into three groups worth
+telling apart: always present (sentiment, urgency, routing, actionability,
+requires_human, emotions), present only when the ladder reached an LLM tier
+(tone, topics, intent, aspects), and present only when the caller supplied a
+`rating` (rating_consistency). The renderer walks the always-present shape
+first, then each conditional block, noting rather than hiding when a
+conditional one is empty — that absence is itself informative about how far
+the ladder climbed.
+
+Every panel is one of `dashboard.py`'s dense data grids: several related
+facts on one monospace row, colour reserved for state actually worth a second
+look (a failure, a ceiling, a flag) rather than decorating every field.
 """
 
 from __future__ import annotations
@@ -12,19 +21,38 @@ from typing import Any
 
 import streamlit as st
 
-from air_client.theme import badge, note, section
+from air_client import dashboard
+from air_client.currency import format_cost
+from air_client.dashboard import Kind, num, pct, text, yn
+from air_client.tables import arrow_safe
+from air_client.theme import note
 
-_URGENCY_KIND = {
-    "low": "neutral",
-    "medium": "mixed",
-    "high": "negative",
-    "critical": "negative",
+_SENTIMENT_KIND: dict[str, Kind] = {
+    "positive": "ok",
+    "negative": "err",
+    "mixed": "warn",
+    "neutral": "",
+    "unknown": "muted",
 }
-_ACTIONABILITY_KIND = {
-    "none": "neutral",
-    "informational": "neutral",
-    "actionable": "mixed",
-    "blocking": "negative",
+_URGENCY_KIND: dict[str, Kind] = {"low": "", "medium": "warn", "high": "err", "critical": "err"}
+_ACTIONABILITY_KIND: dict[str, Kind] = {
+    "none": "",
+    "informational": "",
+    "actionable": "warn",
+    "blocking": "err",
+}
+_PRIORITY_KIND: dict[str, Kind] = {"p1": "err", "p2": "warn", "p3": "", "p4": ""}
+_TONE_KIND: dict[str, Kind] = {
+    "satisfied": "ok",
+    "appreciative": "ok",
+    "neutral": "",
+    "confused": "",
+    "frustrated": "warn",
+    "urgent": "warn",
+    "sarcastic": "warn",
+    "angry": "err",
+    "disappointed": "err",
+    "anxious": "err",
 }
 
 
@@ -32,111 +60,165 @@ def _as_dict(value: Any) -> dict[str, Any]:
     return value if isinstance(value, dict) else {}
 
 
+def _labeled(value: Any, kinds: dict[str, Kind]) -> tuple[str, Kind]:
+    """`{label, confidence}` → one dense value string, plus its colour."""
+    scored = _as_dict(value)
+    label = scored.get("label")
+    if not label:
+        return "—", "muted"
+    confidence = scored.get("confidence")
+    display = f"{label} · {confidence:.0%}" if isinstance(confidence, int | float) else str(label)
+    return display, kinds.get(str(label), "")
+
+
 def _verdict(payload: dict[str, Any]) -> None:
     sentiment = _as_dict(payload.get("sentiment"))
-    label = str(sentiment.get("label", "unknown"))
+    label = sentiment.get("label", "unknown")
     polarity = sentiment.get("polarity")
     confidence = sentiment.get("confidence")
+    language = _as_dict(payload.get("language"))
+    degraded = bool(payload.get("degraded"))
 
-    left, mid, right = st.columns([1.4, 1, 1])
-    with left:
-        st.markdown("**Sentiment**")
-        st.markdown(badge(label, label), unsafe_allow_html=True)
-    with mid:
-        st.metric(
-            "Polarity",
-            f"{polarity:+.2f}" if isinstance(polarity, int | float) else "—",
-            help="-1 wholly negative, +1 wholly positive.",
-        )
-    with right:
-        st.metric(
-            "Confidence",
-            f"{confidence:.0%}" if isinstance(confidence, int | float) else "—",
-        )
+    dashboard.grid(
+        "Verdict",
+        [
+            [
+                ("label", text(label), _SENTIMENT_KIND.get(str(label), "")),
+                ("polarity", f"{polarity:+.2f}" if isinstance(polarity, int | float) else "—", ""),
+                ("confidence", pct(confidence), ""),
+            ],
+            [
+                ("decided_by", text(payload.get("decided_by")), ""),
+                ("degraded", yn(degraded), "err" if degraded else ""),
+                ("cached", yn(payload.get("cached")), ""),
+                (
+                    "language",
+                    f"{language.get('code', '—')} · {pct(language.get('confidence'))}",
+                    "",
+                ),
+            ],
+        ],
+    )
 
     rationale = sentiment.get("rationale")
     if isinstance(rationale, str) and rationale.strip():
-        st.markdown(f"> {rationale}")
+        st.caption(f"“{rationale}”")
 
-
-def _provenance(payload: dict[str, Any]) -> None:
-    """Which rung decided, and whether the answer is trustworthy."""
-    cols = st.columns(4)
-    cols[0].metric("Decided by", str(payload.get("decided_by", "—")))
-    cols[1].metric("Degraded", "yes" if payload.get("degraded") else "no")
-    cols[2].metric("Cached", "yes" if payload.get("cached") else "no")
-    language = _as_dict(payload.get("language"))
-    code = language.get("code")
-    cols[3].metric("Language", str(code) if code else "—")
-
-    if payload.get("degraded"):
+    if degraded:
         st.warning(
             "`degraded: true` — at least one tier failed and the verdict came from a "
-            "lower rung than the ladder wanted. Check the escalation trace."
+            "lower rung than the ladder wanted. Check the escalation trace below."
         )
 
 
-def _domain_extras(payload: dict[str, Any]) -> None:
-    """Feedback's routing block and reviews' rating check, when present."""
-    urgency = payload.get("urgency")
-    actionability = payload.get("actionability")
-    route = payload.get("suggested_route")
-    if urgency or actionability or route:
-        section("Routing")
-        cols = st.columns(3)
-        with cols[0]:
-            st.markdown("**Urgency**")
-            st.markdown(
-                badge(str(urgency), _URGENCY_KIND.get(str(urgency), "neutral")) if urgency else "—",
-                unsafe_allow_html=True,
-            )
-        with cols[1]:
-            st.markdown("**Actionability**")
-            st.markdown(
-                badge(str(actionability), _ACTIONABILITY_KIND.get(str(actionability), "neutral"))
-                if actionability
-                else "—",
-                unsafe_allow_html=True,
-            )
-        with cols[2]:
-            st.markdown("**Suggested route**")
-            st.markdown(f"`{route}`" if route else "—")
+def _routing_and_actionability(payload: dict[str, Any]) -> None:
+    """Urgency, actionability, routing and requires_human — unconditional fields
+    on `ClassificationResponse` now, heuristics computed for every verdict
+    rather than only ones that arrived via the old `/feedback` route."""
+    urgency_value, urgency_kind = _labeled(payload.get("urgency"), _URGENCY_KIND)
+    actionability = str(payload.get("actionability") or "—")
+    routing = _as_dict(payload.get("routing"))
+    queue = routing.get("queue")
+    priority = str(routing.get("priority") or "")
+    requires_human = bool(payload.get("requires_human"))
 
+    dashboard.grid(
+        "Routing",
+        [
+            [
+                ("urgency", urgency_value, urgency_kind),
+                ("actionability", actionability, _ACTIONABILITY_KIND.get(actionability, "")),
+                ("queue", text(queue), "" if queue else "muted"),
+                (
+                    "priority",
+                    priority or "—",
+                    _PRIORITY_KIND.get(priority.lower(), "") if priority else "muted",
+                ),
+                ("requires_human", yn(requires_human), "warn" if requires_human else "muted"),
+            ]
+        ],
+    )
+
+
+def _tone_topics_intent(payload: dict[str, Any]) -> None:
+    """Tone, topics and intent — populated only when the ladder reached an LLM
+    tier *and* the request wanted them filled. Absence is the common case,
+    not a bug, so it is the grid's own empty state rather than a hidden panel.
+    """
+    tone_value, tone_kind = _labeled(payload.get("tone"), _TONE_KIND)
+    intent_value, _ = _labeled(payload.get("intent"), {})
+    topics = payload.get("topics")
+    topic_labels = (
+        ", ".join(str(t.get("label")) for t in topics if isinstance(t, dict))
+        if isinstance(topics, list) and topics
+        else ""
+    )
+
+    rows = (
+        []
+        if tone_value == "—" and intent_value == "—" and not topic_labels
+        else [
+            [
+                ("tone", tone_value, tone_kind),
+                ("intent", intent_value, "" if intent_value != "—" else "muted"),
+                ("topics", topic_labels or "—", "" if topic_labels else "muted"),
+            ]
+        ]
+    )
+    dashboard.grid(
+        "Tone, topics & intent",
+        rows,
+        empty=(
+            "No tone, topics or intent — either the ladder stopped before an LLM tier, or "
+            "the deciding rung was not asked to fill them."
+        ),
+    )
+
+
+def _rating_consistency_block(payload: dict[str, Any]) -> None:
+    """Reviews' rating check — only rendered when the caller supplied a rating."""
     consistency = _as_dict(payload.get("rating_consistency"))
-    if consistency:
-        section("Rating consistency")
-        agreement = str(consistency.get("agreement", "—"))
-        delta = consistency.get("delta")
-        normalised = consistency.get("normalised_rating")
-        cols = st.columns(3)
-        cols[0].metric("Agreement", agreement.replace("_", " "))
-        cols[1].metric(
-            "Delta",
-            f"{delta:+.2f}" if isinstance(delta, int | float) else "—",
-            help="Prose polarity minus the normalised star rating.",
+    if not consistency:
+        return
+
+    agreement = str(consistency.get("agreement", "—"))
+    delta = consistency.get("delta")
+    normalised = consistency.get("normalised_rating")
+    disagrees = agreement not in ("agrees", "—")
+
+    dashboard.grid(
+        "Rating consistency",
+        [
+            [
+                ("agreement", agreement.replace("_", " "), "warn" if disagrees else ""),
+                ("delta", f"{delta:+.2f}" if isinstance(delta, int | float) else "—", ""),
+                (
+                    "normalised_rating",
+                    f"{normalised:+.2f}" if isinstance(normalised, int | float) else "—",
+                    "",
+                ),
+            ]
+        ],
+    )
+    if disagrees:
+        st.info(
+            f"The prose and the stars disagree ({agreement.replace('_', ' ')}) — often the "
+            "most interesting rows in a review set."
         )
-        cols[2].metric(
-            "Normalised rating",
-            f"{normalised:+.2f}" if isinstance(normalised, int | float) else "—",
-            help="The author's stars mapped onto the polarity scale.",
-        )
-        if agreement != "agrees":
-            st.info(
-                f"The prose and the stars disagree ({agreement.replace('_', ' ')}) — "
-                "often the most interesting rows in a review set."
-            )
 
 
 def _emotions_and_aspects(payload: dict[str, Any]) -> None:
     emotions = payload.get("emotions")
     if isinstance(emotions, list) and emotions:
-        section("Emotions")
+        dashboard.table_title("Emotions")
         st.dataframe(
-            [
-                {"emotion": e.get("name", ""), "score": e.get("score")}
-                for e in emotions
-                if isinstance(e, dict)
-            ],
+            arrow_safe(
+                [
+                    {"emotion": e.get("name", ""), "score": e.get("score")}
+                    for e in emotions
+                    if isinstance(e, dict)
+                ]
+            ),
             hide_index=True,
             width="stretch",
             column_config={
@@ -148,18 +230,20 @@ def _emotions_and_aspects(payload: dict[str, Any]) -> None:
 
     aspects = payload.get("aspects")
     if isinstance(aspects, list) and aspects:
-        section("Aspects")
+        dashboard.table_title("Aspects")
         st.dataframe(
-            [
-                {
-                    "aspect": a.get("name", ""),
-                    "label": a.get("label", ""),
-                    "confidence": a.get("confidence"),
-                    "evidence": a.get("evidence", ""),
-                }
-                for a in aspects
-                if isinstance(a, dict)
-            ],
+            arrow_safe(
+                [
+                    {
+                        "aspect": a.get("name", ""),
+                        "label": a.get("label", ""),
+                        "confidence": a.get("confidence"),
+                        "evidence": a.get("evidence", ""),
+                    }
+                    for a in aspects
+                    if isinstance(a, dict)
+                ]
+            ),
             hide_index=True,
             width="stretch",
             column_config={
@@ -171,6 +255,10 @@ def _emotions_and_aspects(payload: dict[str, Any]) -> None:
 
 
 def _trace(payload: dict[str, Any]) -> None:
+    """The escalation ladder — one row per rung tried, with the model that
+    answered folded in from `model_versions` rather than shown as a separate
+    panel: it is the same fact ("what actually served this rung") read
+    alongside the rest of that rung's row, not a fact on its own."""
     trace = payload.get("escalation_trace")
     if not isinstance(trace, list) or not trace:
         note(
@@ -179,20 +267,24 @@ def _trace(payload: dict[str, Any]) -> None:
         )
         return
 
-    section("Escalation ladder")
+    versions = _as_dict(payload.get("model_versions"))
+    dashboard.table_title("Escalation ladder")
     st.dataframe(
-        [
-            {
-                "tier": step.get("tier", ""),
-                "label": step.get("label", ""),
-                "confidence": step.get("confidence"),
-                "latency ms": step.get("latency_ms"),
-                "ok": step.get("succeeded"),
-                "escalated because": step.get("escalated_because") or "— (accepted)",
-            }
-            for step in trace
-            if isinstance(step, dict)
-        ],
+        arrow_safe(
+            [
+                {
+                    "tier": step.get("tier", ""),
+                    "label": step.get("label", ""),
+                    "confidence": step.get("confidence"),
+                    "latency ms": step.get("latency_ms"),
+                    "model": versions.get(str(step.get("tier")), "—"),
+                    "ok": step.get("succeeded"),
+                    "escalated because": step.get("escalated_because") or "— (accepted)",
+                }
+                for step in trace
+                if isinstance(step, dict)
+            ]
+        ),
         hide_index=True,
         width="stretch",
         column_config={
@@ -205,49 +297,61 @@ def _trace(payload: dict[str, Any]) -> None:
 
 def _safety_and_usage(payload: dict[str, Any]) -> None:
     safety = _as_dict(payload.get("safety"))
-    if safety:
-        section("Safety")
-        cols = st.columns(4)
-        cols[0].metric("PII redacted", "yes" if safety.get("pii_redacted") else "no")
-        cols[1].metric("Flagged", "yes" if safety.get("flagged") else "no")
-        cols[2].metric("Truncated", "yes" if safety.get("truncated") else "no")
-        findings = safety.get("pii_findings")
-        count = (
-            sum(int(f.get("count", 0)) for f in findings if isinstance(f, dict))
-            if isinstance(findings, list)
-            else 0
-        )
-        cols[3].metric("PII findings", count)
+    pii_redacted = bool(safety.get("pii_redacted"))
+    flagged = bool(safety.get("flagged"))
+    truncated = bool(safety.get("truncated"))
+    findings = safety.get("pii_findings")
+    finding_count = (
+        sum(int(f.get("count", 0)) for f in findings if isinstance(f, dict))
+        if isinstance(findings, list)
+        else 0
+    )
 
-        if isinstance(findings, list) and findings:
-            st.dataframe(
+    dashboard.grid(
+        "Safety",
+        [
+            [
+                ("pii_redacted", yn(pii_redacted), "ok" if pii_redacted else "muted"),
+                ("pii_findings", str(finding_count), "warn" if finding_count else "muted"),
+                ("flagged", yn(flagged), "err" if flagged else "muted"),
+                ("truncated", yn(truncated), "warn" if truncated else "muted"),
+            ]
+        ],
+    )
+    if isinstance(findings, list) and findings:
+        st.dataframe(
+            arrow_safe(
                 [
                     {"kind": f.get("kind", ""), "count": f.get("count")}
                     for f in findings
                     if isinstance(f, dict)
-                ],
-                hide_index=True,
-                width="stretch",
-            )
-        reason = safety.get("flag_reason")
-        if isinstance(reason, str) and reason:
-            st.warning(f"Flagged: {reason}")
+                ]
+            ),
+            hide_index=True,
+            width="stretch",
+        )
+    reason = safety.get("flag_reason")
+    if isinstance(reason, str) and reason:
+        st.warning(f"Flagged: {reason}")
 
     usage = _as_dict(payload.get("usage"))
-    if usage:
-        section("Usage")
-        cols = st.columns(5)
-        cols[0].metric("Tiers run", usage.get("tiers_run", "—"))
-        cols[1].metric("Tokens in", usage.get("tokens_in", "—"))
-        cols[2].metric("Tokens out", usage.get("tokens_out", "—"))
-        cols[3].metric("Cache read", usage.get("cache_read_tokens", "—"))
-        cost = usage.get("est_cost_usd")
-        cols[4].metric("Est. cost", f"${cost:.5f}" if isinstance(cost, int | float) else "—")
-
-    versions = _as_dict(payload.get("model_versions"))
-    if versions:
-        with st.expander("Model versions"):
-            st.json(versions)
+    cost = usage.get("est_cost_usd")
+    dashboard.grid(
+        "Usage & cost",
+        [
+            [
+                ("tiers_run", num(usage.get("tiers_run")), ""),
+                ("tokens_in", num(usage.get("tokens_in")), ""),
+                ("tokens_out", num(usage.get("tokens_out")), ""),
+                ("cache_read_tokens", num(usage.get("cache_read_tokens")), ""),
+                (
+                    "cost",
+                    format_cost(cost) if isinstance(cost, int | float) else "—",
+                    "" if isinstance(cost, int | float) and cost > 0 else "muted",
+                ),
+            ]
+        ],
+    )
 
     metadata = _as_dict(payload.get("metadata"))
     if metadata:
@@ -256,15 +360,16 @@ def _safety_and_usage(payload: dict[str, Any]) -> None:
 
 
 def render_analysis(payload: Any) -> None:
-    """Render one analysis response — sentiment, feedback or review alike."""
+    """Render one `/v1/classify` response, whatever fields it happens to carry."""
     payload = _as_dict(payload)
     if not payload:
         note("Nothing to summarise.")
         return
 
     _verdict(payload)
-    _provenance(payload)
-    _domain_extras(payload)
+    _routing_and_actionability(payload)
+    _tone_topics_intent(payload)
+    _rating_consistency_block(payload)
     _emotions_and_aspects(payload)
     _trace(payload)
     _safety_and_usage(payload)
@@ -278,16 +383,22 @@ def render_batch(payload: Any) -> None:
         note("No items in this batch response.")
         return
 
-    cols = st.columns(4)
-    cols[0].metric("Succeeded", payload.get("succeeded", "—"))
-    cols[1].metric("Failed", payload.get("failed", "—"))
-    latency = payload.get("latency_ms")
-    cols[2].metric("Service ms", f"{latency:.0f}" if isinstance(latency, int | float) else "—")
     usage = _as_dict(payload.get("usage"))
     cost = usage.get("est_cost_usd")
-    cols[3].metric("Est. cost", f"${cost:.5f}" if isinstance(cost, int | float) else "—")
+    latency = payload.get("latency_ms")
+    dashboard.grid(
+        "Batch",
+        [
+            [
+                ("succeeded", num(payload.get("succeeded")), ""),
+                ("failed", num(payload.get("failed")), "err" if payload.get("failed") else ""),
+                ("service_ms", f"{latency:.0f}" if isinstance(latency, int | float) else "—", ""),
+                ("cost", format_cost(cost) if isinstance(cost, int | float) else "—", ""),
+            ]
+        ],
+    )
 
-    section("Items")
+    dashboard.table_title("Items")
     overview = []
     for item in items:
         if not isinstance(item, dict):
@@ -306,7 +417,7 @@ def render_batch(payload: Any) -> None:
                 "error": error.get("title", ""),
             }
         )
-    st.dataframe(overview, hide_index=True, width="stretch")
+    st.dataframe(arrow_safe(overview), hide_index=True, width="stretch")
 
     for item in items:
         if not isinstance(item, dict):

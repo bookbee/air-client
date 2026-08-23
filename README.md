@@ -8,13 +8,14 @@ their own machine, and point it at whichever deployment is under test — usuall
 a remote one. Everything below follows from that: the console never guesses
 where it is connecting, and it never lets you forget.
 
-Three tabs, one per surface:
+Four tabs, one per surface:
 
-| Tab            | Service        | What it does                                             |
-| -------------- | -------------- | -------------------------------------------------------- |
-| **Classifier** | air-classifier | All three classification routes, single and batch        |
-| **Chat**       | air-platform   | Request builder — the chat API does not exist yet        |
-| **System**     | both           | Health, readiness, capabilities, and a log of every call |
+| Tab | Service | What it does |
+| --- | --- | --- |
+| **Classifier** | air-classifier | `/v1/classify`, single and batch, plus tier probes |
+| **Platform** | air-platform | Both channels: `/v1/chat` and `/v1/query` |
+| **LLM** | air-llm | `/v1/inference` — chat and embeddings, one endpoint |
+| **System** | all three | Health, readiness, capabilities, and a log of every call |
 
 ## Quickstart
 
@@ -139,6 +140,15 @@ make run THEME=dark            # or THEME=light
 
 `AIR_CLIENT__THEME=auto|light|dark` in `.env` sets the start-up mode for a team.
 
+### Currency
+
+Every AIR service bills and reports cost in USD — that is what every provider
+actually charges in. Wherever the console shows a cost figure, it also shows
+an approximate ₹ conversion next to it (`$0.00042 · ~₹0.04`), purely for
+convenience. There is no live FX feed: the rate is a fixed default, adjustable
+for the session in the sidebar's **Request behaviour** panel, or preset with
+`AIR_CLIENT__USD_TO_INR_RATE` in `.env`.
+
 ### Targets
 
 A target is a named bundle of base URLs and keys. Declare one per deployment in
@@ -152,6 +162,8 @@ AIR_CLIENT__TARGETS__QA__CLASSIFIER_BASE_URL=https://classifier.qa.example.inter
 AIR_CLIENT__TARGETS__QA__CLASSIFIER_API_KEY=airc_…
 AIR_CLIENT__TARGETS__QA__PLATFORM_BASE_URL=https://platform.qa.example.internal
 AIR_CLIENT__TARGETS__QA__PLATFORM_API_KEY=
+AIR_CLIENT__TARGETS__QA__LLM_BASE_URL=https://llm.qa.example.internal
+AIR_CLIENT__TARGETS__QA__LLM_API_KEY=
 ```
 
 `local` always exists, whether or not `.env` does. Switching targets rewrites
@@ -165,23 +177,30 @@ edits last for the browser session, `.env` is the durable copy. See
 air-classifier answers one question — what is this text saying, and how sure are
 we — through a four-rung escalation ladder: `t0_rules` → `t1_classifier` →
 `t2_local_llm` → `t3_cloud_llm`. Every request enters at the cheapest rung and
-climbs only when the rung below is not confident enough. The three routes are
-that same ladder, specialised:
+climbs only when the rung below is not confident enough.
 
-| Route           | Purpose                                                  | Adds to the request                                             | Adds to the response                          |
-| --------------- | -------------------------------------------------------- | --------------------------------------------------------------- | --------------------------------------------- |
-| `/v1/sentiment` | The base verdict, no assumptions about the text's origin | —                                                               | —                                             |
-| `/v1/feedback`  | Triage inbound product and support feedback              | `channel`, `user_segment`, `subject`                            | `urgency`, `actionability`, `suggested_route` |
-| `/v1/reviews`   | Read marketplace reviews per aspect, prose against stars | `rating`, `rating_scale_max`, `product_id`, `verified_purchase` | `aspects`, `rating_consistency`               |
+One endpoint now, not three: `POST /v1/classify` absorbed what used to be
+`/v1/sentiment`, `/v1/feedback` and `/v1/reviews` into a single request shape.
+`channel`/`user_segment`/`subject` (feedback-shaped) and
+`rating`/`rating_scale_max`/`product_id`/`verified_purchase`/`title`
+(review-shaped) are both always-available optional fields now, not
+route-gated ones — the tab shows them behind one "Optional context" expander.
+**Single** posts one item; **Batch** posts to `/v1/classify/batch`, taking
+either one text per line or a full JSON items array.
 
-All three are shown side by side in the tab, with the selected one lit, so the
-difference stays visible while you work. **Single** posts one item; **Batch**
-posts to `/{route}/batch`, taking either one text per line or a full JSON items
-array.
+A **Tier probes** expander above the form pins `options.min_tier`/`max_tier`
+to a named rung and fills in one of the confident sample texts below, sourced
+straight from this repo's own `docs` — a pinned tier that cannot serve
+returns `503` rather than quietly falling back, so a working response really
+did come from the rung named on the button.
 
-The response pane shows a **Summary** (verdict, which tier decided, the
-escalation ladder, safety, usage), the **raw JSON**, the **headers**, and the
-**request** as runnable cURL with the API key masked until you ask for it.
+The response pane shows a **Summary** — a dense, dashboard-style read-out of
+the verdict, routing, tone/topics/intent, rating consistency (when a rating
+was supplied), aspects, emotions, the escalation ladder with the model that
+answered each rung, safety and usage/cost (in USD, with an approximate ₹
+figure alongside it — see [Currency](#currency) below) — the **raw JSON**,
+the **headers**, and the **request** as runnable cURL with the API key
+masked until you ask for it.
 
 ### Why options have tick boxes
 
@@ -197,28 +216,80 @@ The same care applies to blank text inputs — every request model sets
 `additionalProperties: false`, so empty fields are omitted, never sent as `""`
 or `null`.
 
-## Chat tab
+## Platform tab
 
-**air-platform currently ships only a README.** There is no chat endpoint to
-code against, so this tab is a Postman-style request builder rather than a form:
-you own the method, path, headers and body; the console owns auth, timing and
-rendering. When the contract lands, adopting it means saving a preset — not
-rewriting the tab.
+air-platform runs one pipeline behind two entry points, differing only by
+profile — guardrails, output contract, audit sink, quota bucket, tool allow-list:
 
-- `{{message}}` and `{{session_id}}` in the body template are substituted and
-  JSON-escaped at send time, so the composer box drives whichever field the
-  eventual contract uses.
-- The reply extractor probes the response for the field that plausibly holds the
-  assistant's text (`reply`, `choices[0].message.content`, `data.reply`, …),
-  renders it as a chat bubble, and tells you which path it used. Add the real
-  one to `REPLY_PATHS` in `src/air_client/tabs/chat.py` once it is settled.
-- Presets ship for a simple chat shape, an OpenAI-style shape and a RAG shape.
-  Save your own with the name box next to **Send**; they last for the session.
+| Route | Channel | Body field | Adds |
+| --- | --- | --- | --- |
+| `POST /v1/chat` | customer | `message` | public conversational traffic |
+| `POST /v1/query` | business | `query` | `output_schema` for structured output |
+
+**The channel comes from the API key, not from a header.** A caller that could
+name its own channel could select the weaker guardrail profile, so air-platform
+refuses to read it from the request and enforces the pairing: the customer key on
+`/v1/query` is a 403, and so is the business key on `/v1/chat`. The console
+therefore holds **one key per channel** and sends the one belonging to the route
+you picked — the Send button names the channel it is about to use.
+
+Both development keys are preloaded, so both routes work on a fresh clone:
+
+```bash
+AIR_CLIENT__TARGETS__LOCAL__PLATFORM_CUSTOMER_API_KEY=airp_local_customer_key
+AIR_CLIENT__TARGETS__LOCAL__PLATFORM_BUSINESS_API_KEY=airp_local_business_key
+```
+
+The older single `PLATFORM_API_KEY` is still read, as the customer key.
+
+The response pane decodes a `TurnResult`: the answer as a chat bubble, then a
+dashboard summary (status, grounded, refusal, routes, session), any structured
+output, the citations, the nine pipeline stages with their latencies, and
+usage including cost. A turn that warrants a write returns a **proposal** and
+changes nothing — the panel offers **Confirm & execute** and **Decline**
+buttons that send a second turn on the same session carrying `confirm`, per
+`docs/02-lld.md` §8. Neither development key grants `allow_actions`, so both
+403 against a local checkout, which is the correct outcome; they are there
+for a remote key that actually carries the scope.
+
+`session_id` is returned by the first turn and fed back into the box, so the next
+turn continues the same conversation instead of silently starting a new one.
+
+## LLM tab
+
+air-llm is the AIR platform's central LLM gateway — one unified inference API
+in front of Ollama, Anthropic, OpenAI and Gemini, with provider
+routing/failover, cost accounting and response caching. It has no UI or test
+harness of its own, so this tab is the only place most developers will see a
+raw response from it before wiring a real integration.
+
+One endpoint, `POST /v1/inference`, does both tasks it supports — a `task`
+radio picks between them, not a route:
+
+| Task | Sends | Notes |
+| --- | --- | --- |
+| **chat** | `messages` (one required message, or a hand-built JSON array under "Advanced") | Stateless per call — no `session_id`, unlike air-platform |
+| **embeddings** | `input`, one string per line | Returns one vector per input string |
+
+Every other field — `model`, `max_tokens`, `temperature`, `json_schema` +
+`schema_name`, `cache_prefix` — sits at the request's top level, not under an
+`options` sub-object the way air-classifier's and air-platform's do, since
+`InferenceRequest` has no such wrapper.
+
+The response pane shows a dashboard summary (task, provider, model, cached,
+refusal, finish_reason), the answer as a chat bubble or the embedding count
+and dimensionality, and usage/cost. A **Check my policy** button below the
+form calls `GET /v1/admin/policy` and shows the raw response — what your key
+is actually scoped to, useful when a call 403s and you want to know why.
 
 ## System tab
 
-Liveness, readiness and the tier inventory for both services, against the
-currently selected target.
+Liveness, readiness and the tier/provider inventory for all three services,
+against the currently selected target.
+
+The platform panel has a **channel** switch, because `/v1/capabilities` answers
+per channel — guardrails, routes and quotas are profile-specific, so the answer
+depends on which key asked.
 
 `/v1/capabilities` is the one to reach for first. It reports the version, the
 batch ceiling and the tier inventory *of the environment you are testing* —
@@ -238,16 +309,19 @@ src/air_client/
   app.py                    entry point and tab shell
   config.py                 targets and defaults read from .env
   connection.py             the resolved destination, handed to every tab
+  currency.py               USD -> INR display for cost figures, not a live rate
+  dashboard.py              the dense data-grid every response summary is built from
   http.py                   one request in, one Exchange out; cURL rendering
   state.py                  session-scoped storage, so responses survive reruns
-  theme.py                  the CSS
+  theme.py                  the CSS — fonts, palettes, and dashboard.py's grid styling
   components/
     sidebar.py              target switcher and connection settings
     target_bar.py           the "where is this going" strip and health probe
     response_view.py        the shared response pane
-    summary.py              decoding an analysis response
+    summary.py              decoding a /v1/classify response
+  tables.py                 columns Arrow can type; mixed ones render as text
   tabs/
-    classifier.py  chat.py  system.py
+    classifier.py  platform.py  llm.py  system.py
 ```
 
 `make check` runs ruff and mypy (strict).

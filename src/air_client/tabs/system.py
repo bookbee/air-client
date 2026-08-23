@@ -22,6 +22,7 @@ from air_client.components import response_view, target_bar
 from air_client.connection import Connection
 from air_client.http import build_headers, join_url, send
 from air_client.state import current, history, remember
+from air_client.tables import arrow_safe
 from air_client.theme import section
 
 PROBES = {
@@ -46,31 +47,103 @@ def _detail(value: Any) -> str:
     return str(value) if value else ""
 
 
+#: Capability keys rendered by a block of their own, in this order. Everything
+#: else in the payload falls through to the generic table below, so a service
+#: that adds a field gets a readable view without a change here.
+#:
+#: `environment`/`default_model` are air-llm's own spelling of what
+#: air-classifier calls `env` — plain scalars, both, so without a name here
+#: they would not fall through anywhere: the generic loop below only picks up
+#: dict and list values, and a bare string that matches neither would silently
+#: vanish from the screen rather than render badly.
+_HEADLINE = ("service", "version", "env", "channel", "environment", "default_model")
+
+
+def _facts(payload: dict[str, Any]) -> None:
+    """Whichever of the headline identity fields this service reports.
+
+    air-classifier and air-platform answer /v1/capabilities with different
+    shapes — tiers and batch ceilings on one, channel and guardrails on the
+    other — and both are read on the same screen. So the renderer follows the
+    payload rather than one service's schema.
+    """
+    present = [(key, payload[key]) for key in _HEADLINE if key in payload]
+    present += [
+        (key, payload[key]) for key in ("max_batch_items", "max_text_chars") if key in payload
+    ]
+    if not present:
+        return
+    for column, (key, value) in zip(st.columns(len(present)), present, strict=True):
+        column.metric(key.replace("_", " ").title(), str(value))
+
+
+def _flat_block(label: str, value: dict[str, Any]) -> None:
+    """A one-level map — guardrails, streaming, session, turn — as a table."""
+    section(label.replace("_", " ").title())
+    # One column, mixed types — booleans, ints and strings all land in `value`.
+    # Arrow rejects that, so every cell is rendered as text on the way in.
+    st.dataframe(
+        arrow_safe(
+            [
+                {
+                    "setting": k.replace("_", " "),
+                    "value": _detail(v) if isinstance(v, dict) else json.dumps(v),
+                }
+                for k, v in value.items()
+            ]
+        ),
+        hide_index=True,
+        width="stretch",
+    )
+
+
+def _provider_map_block(payload: dict[str, Any]) -> None:
+    """`providers: {name: bool}` — air-llm's own shape, on both `/v1/ready` and
+    `/v1/capabilities`.
+
+    Neither the components/dependencies loop below (a *list* of dicts) nor the
+    capabilities fallthrough at the bottom of `_capabilities_summary` (which
+    renders an unfamiliar dict as an opaque key/value table) reads this as
+    anything more specific than that — and which providers are actually
+    reachable is the one thing worth a glance here.
+    """
+    providers = payload.get("providers")
+    if not isinstance(providers, dict) or not providers:
+        return
+    section("Providers")
+    st.dataframe(
+        arrow_safe([{"provider": name, "reachable": ok} for name, ok in providers.items()]),
+        hide_index=True,
+        width="stretch",
+    )
+    down = [name for name, ok in providers.items() if ok is False]
+    if down:
+        st.warning("Unreachable: " + ", ".join(down))
+
+
 def _capabilities_summary(payload: Any) -> None:
     if not isinstance(payload, dict):
         return
 
-    cols = st.columns(4)
-    cols[0].metric("Service", str(payload.get("service", "—")))
-    cols[1].metric("Version", str(payload.get("version", "—")))
-    cols[2].metric("Max batch items", payload.get("max_batch_items", "—"))
-    cols[3].metric("Max text chars", payload.get("max_text_chars", "—"))
+    _facts(payload)
 
     tiers = payload.get("tiers")
     if isinstance(tiers, list) and tiers:
         section("Tiers")
         st.dataframe(
-            [
-                {
-                    "tier": t.get("tier", ""),
-                    "enabled": t.get("enabled"),
-                    "available": t.get("available"),
-                    "model version": t.get("model_version") or "—",
-                    "detail": _detail(t.get("detail")),
-                }
-                for t in tiers
-                if isinstance(t, dict)
-            ],
+            arrow_safe(
+                [
+                    {
+                        "tier": t.get("tier", ""),
+                        "enabled": t.get("enabled"),
+                        "available": t.get("available"),
+                        "model version": t.get("model_version") or "—",
+                        "detail": _detail(t.get("detail")),
+                    }
+                    for t in tiers
+                    if isinstance(t, dict)
+                ]
+            ),
             hide_index=True,
             width="stretch",
         )
@@ -91,15 +164,66 @@ def _capabilities_summary(payload: Any) -> None:
         section("Supported languages")
         st.write(", ".join(f"`{lang}`" for lang in languages))
 
+    _provider_map_block(payload)
+
+    handled = {
+        *_HEADLINE,
+        "max_batch_items",
+        "max_text_chars",
+        "tiers",
+        "supported_languages",
+        "providers",
+    }
+    for key, value in payload.items():
+        if key in handled:
+            continue
+        if isinstance(value, dict) and value:
+            _flat_block(key, value)
+        elif isinstance(value, list) and value and all(not isinstance(v, dict) for v in value):
+            section(key.replace("_", " ").title())
+            st.write(", ".join(f"`{item}`" for item in value))
+
 
 def _readiness_summary(payload: Any) -> None:
+    """Readiness across all three services' shapes.
+
+    air-classifier answers `status` + `components`; air-platform answers `ready`
+    + `dependencies` and adds its own identity; air-llm answers `status` +
+    `providers` (a flat name→reachable map). All three are read on this screen,
+    so the renderer takes whichever fields it finds rather than one service's
+    field names.
+    """
     if not isinstance(payload, dict):
         return
-    st.metric("Status", str(payload.get("status", "—")))
-    components = payload.get("components")
-    if isinstance(components, list) and components:
-        section("Components")
-        st.dataframe(components, hide_index=True, width="stretch")
+
+    facts: list[tuple[str, str]] = []
+    if "status" in payload:
+        facts.append(("Status", str(payload["status"])))
+    if "ready" in payload:
+        facts.append(("Ready", "yes" if payload["ready"] else "no"))
+    facts += [
+        (key.replace("_", " ").title(), str(payload[key]))
+        for key in ("service", "version", "checked_at")
+        if key in payload
+    ]
+    if facts:
+        for column, (label, value) in zip(st.columns(len(facts)), facts, strict=True):
+            column.metric(label, value)
+
+    _provider_map_block(payload)
+
+    for key in ("components", "dependencies"):
+        rows = payload.get(key)
+        if isinstance(rows, list) and rows and all(isinstance(r, dict) for r in rows):
+            section(key.title())
+            st.dataframe(arrow_safe(rows), hide_index=True, width="stretch")
+            not_ready = [
+                str(r.get("name") or r.get("service") or "?")
+                for r in rows
+                if r.get("ready") is False or r.get("reachable") is False
+            ]
+            if not_ready:
+                st.warning("Not ready: " + ", ".join(not_ready))
 
 
 def _probe_summary(name: str) -> Any:
@@ -154,7 +278,9 @@ def _rows() -> list[dict[str, Any]]:
         {
             "method": e.method,
             "url": e.url,
-            "status": e.status_code if e.error is None else "network error",
+            # Deliberately always text: an int here and "network error" there is
+            # the mixed column that makes Arrow raise on every rerun.
+            "status": f"{e.status_code}" if e.error is None else "network error",
             "ms": round(e.elapsed_ms),
             "request id": e.request_id or "",
         }
@@ -189,11 +315,13 @@ def _history_panel() -> None:
         width="stretch",
         help="Attach it to a defect report so the exact URLs and request ids travel with it.",
     )
-    st.dataframe(rows, hide_index=True, width="stretch")
+    st.dataframe(arrow_safe(rows), hide_index=True, width="stretch")
 
 
-def render(classifier: Connection, platform: Connection) -> None:
-    """Draw the system tab for both services."""
+def render(
+    classifier: Connection, customer: Connection, business: Connection, llm: Connection
+) -> None:
+    """Draw the system tab for all three services."""
     st.markdown(
         "Liveness, readiness and the tier inventory for whichever environment the "
         "sidebar is pointed at. Check here first when a request behaves oddly — a "
@@ -205,12 +333,29 @@ def render(classifier: Connection, platform: Connection) -> None:
 
     st.divider()
 
+    section("air-llm")
+    _probe_panel(llm, "system-llm")
+
+    st.divider()
+
     section("air-platform")
     st.caption(
-        "The same probes against the platform base URL. They will fail until the "
-        "service exists — that is expected."
+        "The same probes against the platform base URL. `/v1/capabilities` answers "
+        "per channel — guardrails, routes and quotas are profile-specific — so the "
+        "channel here is the key the probe is sent with."
     )
-    _probe_panel(platform, "system-platform")
+    channel = st.radio(
+        "Channel",
+        ["customer", "business"],
+        horizontal=True,
+        key="system-platform-channel",
+        label_visibility="collapsed",
+    )
+    # Slot keyed by channel, not a fixed name: otherwise flipping the radio
+    # without re-probing would show the previous channel's stored response
+    # under the newly selected one's label — the same collision `target_bar`'s
+    # own probe cache avoids by keying on `connection.label`, not `.service`.
+    _probe_panel(customer if channel == "customer" else business, f"system-platform-{channel}")
 
     st.divider()
     _history_panel()

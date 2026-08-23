@@ -1,11 +1,13 @@
 """The console's skin, in light and dark.
 
-The brief was "a simple Google page, or Postman": generous whitespace, one
-accent colour, flat surfaces, and status carried by a single unmissable pill.
-This module is the whole of it — every colour the console uses is declared here
-once, as a CSS custom property, in two palettes.
+The brief is Postman/Insomnia, not a landing page: one accent colour, flat
+surfaces, status carried by a single unmissable pill, information density over
+whitespace, and a typeface split — Inter for chrome, JetBrains Mono for
+anything a developer copies verbatim (URLs, keys, JSON). This module is the
+whole of it — every colour the console uses is declared here once, as a CSS
+custom property, in two palettes.
 
-Three things shape the implementation:
+Four things shape the implementation:
 
 * **Both palettes are first-class.** QA sessions run for hours; a console that
   only works in light is a console people squint at. Nothing below hardcodes a
@@ -21,6 +23,11 @@ Three things shape the implementation:
   sidebar, header, fields, code and the dataframe grid — and sets
   ``color-scheme`` so scrollbars and native controls follow too. For a
   chrome-perfect forced mode from the start, launch with ``make run THEME=dark``.
+* **Density and typeface are mode-independent.** The root font-size trim, the
+  Inter/JetBrains Mono split, and every padding/radius reduction live in
+  :data:`_STATIC` rather than :data:`_CHROME`, because they apply the same way
+  whether the palette came from an explicit choice or from Streamlit's own
+  ``prefers-color-scheme`` handling in auto mode.
 """
 
 from __future__ import annotations
@@ -32,6 +39,29 @@ import streamlit as st
 MODES: Final[tuple[str, ...]] = ("auto", "light", "dark")
 
 _STATE_KEY: Final[str] = "theme_mode"
+
+# ── Typeface ──────────────────────────────────────────────────────────────────
+#
+# Inter for UI chrome (labels, buttons, headings) and JetBrains Mono for
+# anything holding an identifier, a URL or a payload — base URLs, API keys,
+# JSON bodies, request/response text — the Postman/Insomnia convention of
+# treating "things a developer copies and pastes" as code, not prose. Each has
+# the console's original system stack behind it as a fallback, so a machine
+# with no internet access degrades to exactly the old look instead of a missing
+# font showing tofu or the browser default serif.
+_FONT_UI: Final[str] = (
+    "'Inter', system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif"
+)
+_FONT_MONO: Final[str] = "'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, monospace"
+
+#: Must precede every other rule in the stylesheet — an `@import` anywhere else
+#: in the block is dropped by the CSS spec, not merely deprioritised.
+_FONT_IMPORT: Final[str] = (
+    "@import url('https://fonts.googleapis.com/css2"
+    "?family=Inter:wght@400;500;600;700"
+    "&family=JetBrains+Mono:wght@400;500;600"
+    "&display=swap');"
+)
 
 # ── Palettes ──────────────────────────────────────────────────────────────────
 #
@@ -145,110 +175,164 @@ _CHROME: Final[str] = """
       --gdg-bg-cell-medium: var(--air-surface); --gdg-accent-color: var(--air-blue); }
 """
 
-_STATIC: Final[str] = """
+_STATIC: Final[str] = f"""
+  /* A ~6% root trim — every rem-based measurement in this file, and most of
+     Streamlit's own, shrinks with it. This one line does more of the "compact"
+     work than any individual padding tweak below; the per-component paddings
+     tighten what does not scale off it (fixed-px chrome, dataframe internals). */
+  :root {{ font-size: 15px; }}
+
+  .stApp {{ font-family: {_FONT_UI}; }}
+  /* URLs, keys, JSON bodies, request/response text — anything a developer
+     copies verbatim reads as code, not prose, in every appearance mode
+     (unlike the background/colour overrides below, which only apply when an
+     explicit Light/Dark choice overrides Streamlit's own theme). */
+  input, textarea, [data-baseweb="input"], [data-baseweb="textarea"],
+  [data-baseweb="base-input"], .stCodeBlock, code, pre, [data-testid="stJson"] {{
+      font-family: {_FONT_MONO}; }}
+  .stButton > button, [data-testid="stButton"] > button {{
+      font-family: {_FONT_UI}; font-weight: 600; border-radius: 7px;
+      padding: .3rem .9rem; }}
+
+  /* Streamlit's own inter-widget rhythm is the single biggest source of
+     "spaced out" — tightened here rather than per-tab, so every form benefits. */
+  [data-testid="stVerticalBlock"] {{ gap: .55rem; }}
+
   /* Fluid: fill the window, but keep a gutter and stop lines becoming
      unreadable ribbons on an ultrawide. The top padding is deliberate — it
      clears Streamlit's fixed toolbar so the page header is never underneath
-     it. Padding tightens on narrow screens rather than content being clipped. */
-  .block-container { padding: 4.6rem 2.2rem 3.5rem; max-width: 1800px; }
-  @media (max-width: 900px) { .block-container { padding: 4.2rem 1rem 2.5rem; } }
+     it. Padding tightens on narrow screens rather than content being clipped.
+     Cut roughly a third from the original figures: this was built spacious by
+     default and reads as a control panel, not a landing page, once it isn't. */
+  .block-container {{ padding: 3.3rem 1.6rem 2.2rem; max-width: 1800px; }}
+  @media (max-width: 900px) {{ .block-container {{ padding: 3.1rem .85rem 1.6rem; }} }}
 
   /* The page header. Sits in normal flow, never sticky: a floating band is the
      one thing guaranteed to end up on top of the title it is meant to label. */
-  .air-header { padding: 0 0 .5rem 0; margin: 0 0 .9rem 0;
-      border-bottom: 1px solid var(--air-line); }
-  .air-title { font-size: 1.6rem; font-weight: 500; color: var(--air-ink);
-               letter-spacing: -0.2px; margin: 0 0 .2rem 0; line-height: 1.2; }
-  .air-subtitle { color: var(--air-muted); font-size: .9rem; margin: 0; }
+  .air-header {{ padding: 0 0 .4rem 0; margin: 0 0 .7rem 0;
+      border-bottom: 1px solid var(--air-line); }}
+  .air-title {{ font-size: 1.35rem; font-weight: 600; color: var(--air-ink);
+               letter-spacing: -0.2px; margin: 0 0 .15rem 0; line-height: 1.2; }}
+  .air-subtitle {{ color: var(--air-muted); font-size: .86rem; margin: 0; }}
 
   /* Tabs read as a Google-style underlined nav rather than boxes. */
-  .stTabs [data-baseweb="tab-list"] { gap: .35rem; border-bottom: 1px solid var(--air-line); }
-  .stTabs [data-baseweb="tab"] { height: 44px; padding: 0 1.05rem;
-      background: transparent; font-weight: 500; color: var(--air-muted); }
-  .stTabs [aria-selected="true"] { color: var(--air-blue); }
+  .stTabs [data-baseweb="tab-list"] {{ gap: .3rem; border-bottom: 1px solid var(--air-line); }}
+  .stTabs [data-baseweb="tab"] {{ height: 38px; padding: 0 .9rem;
+      background: transparent; font-weight: 500; color: var(--air-muted); }}
+  .stTabs [aria-selected="true"] {{ color: var(--air-blue); }}
 
   /* ── Target bar ─────────────────────────────────────────────────────────── */
-  .air-target { border: 1px solid var(--air-line); border-left-width: 4px;
-      border-radius: 10px; padding: .55rem .8rem; background: var(--air-surface);
-      margin: 0 0 .9rem 0; }
-  .air-target.local { border-left-color: var(--air-blue); }
-  .air-target.remote { border-left-color: var(--air-amber);
-      background: var(--air-surface-warn); }
-  .air-target-head { display: flex; align-items: baseline; flex-wrap: wrap; gap: .5rem;
-      margin-bottom: .35rem; font-size: .92rem; color: var(--air-ink); }
-  .air-target-label { font-size: .68rem; font-weight: 700; letter-spacing: 1px;
-      color: var(--air-muted); }
-  .air-target-warn { font-size: .78rem; color: var(--air-muted); }
-  .air-target.remote .air-target-warn { color: var(--air-amber); font-weight: 600; }
-  .air-target-row { display: flex; align-items: center; flex-wrap: wrap; gap: .45rem;
+  .air-target {{ border: 1px solid var(--air-line); border-left-width: 4px;
+      border-radius: 8px; padding: .45rem .7rem; background: var(--air-surface);
+      margin: 0 0 .7rem 0; }}
+  .air-target.local {{ border-left-color: var(--air-blue); }}
+  .air-target.remote {{ border-left-color: var(--air-amber);
+      background: var(--air-surface-warn); }}
+  .air-target-head {{ display: flex; align-items: baseline; flex-wrap: wrap; gap: .5rem;
+      margin-bottom: .35rem; font-size: .92rem; color: var(--air-ink); }}
+  .air-target-label {{ font-size: .68rem; font-weight: 700; letter-spacing: 1px;
+      color: var(--air-muted); }}
+  .air-target-warn {{ font-size: .78rem; color: var(--air-muted); }}
+  .air-target.remote .air-target-warn {{ color: var(--air-amber); font-weight: 600; }}
+  .air-target-row {{ display: flex; align-items: center; flex-wrap: wrap; gap: .45rem;
       padding: .16rem 0; font-size: .82rem; color: var(--air-muted);
-      font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
-  .air-target-service { min-width: 8.5rem; color: var(--air-ink); font-weight: 600; }
-  .air-target-url { color: var(--air-ink); }
-  .air-target-probe { display: inline-flex; align-items: center; gap: .35rem; }
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }}
+  .air-target-service {{ min-width: 8.5rem; color: var(--air-ink); font-weight: 600; }}
+  .air-target-url {{ color: var(--air-ink); }}
+  .air-target-probe {{ display: inline-flex; align-items: center; gap: .35rem; }}
 
-  .air-chip { display: inline-block; padding: .05rem .45rem; border-radius: 4px;
+  .air-chip {{ display: inline-block; padding: .05rem .45rem; border-radius: 4px;
       font-size: .68rem; font-weight: 700; letter-spacing: .6px;
-      font-family: system-ui, sans-serif; }
-  .air-chip.local { background: var(--air-chip-local-bg); color: var(--air-blue); }
-  .air-chip.remote { background: var(--air-chip-remote-bg); color: var(--air-amber); }
-  .air-chip.unset { background: var(--air-neg-bg); color: var(--air-red); }
-  .air-chip.key { background: var(--air-pos-bg); color: var(--air-green); }
-  .air-chip.nokey { background: var(--air-neg-bg); color: var(--air-red); }
+      font-family: system-ui, sans-serif; }}
+  .air-chip.local {{ background: var(--air-chip-local-bg); color: var(--air-blue); }}
+  .air-chip.remote {{ background: var(--air-chip-remote-bg); color: var(--air-amber); }}
+  .air-chip.unset {{ background: var(--air-neg-bg); color: var(--air-red); }}
+  .air-chip.key {{ background: var(--air-pos-bg); color: var(--air-green); }}
+  .air-chip.nokey {{ background: var(--air-neg-bg); color: var(--air-red); }}
 
-  .air-dot { width: .5rem; height: .5rem; border-radius: 999px; display: inline-block; }
-  .air-dot.ok { background: var(--air-green); }
-  .air-dot.err { background: var(--air-red); }
-  .air-dot.unknown { background: var(--air-line); }
+  .air-dot {{ width: .5rem; height: .5rem; border-radius: 999px; display: inline-block; }}
+  .air-dot.ok {{ background: var(--air-green); }}
+  .air-dot.err {{ background: var(--air-red); }}
+  .air-dot.unknown {{ background: var(--air-line); }}
 
   /* ── Route cards ────────────────────────────────────────────────────────── */
-  .air-route { border: 1px solid var(--air-line); border-radius: 10px;
-      padding: .6rem .8rem; height: 100%; background: var(--air-bg); }
-  .air-route.on { border-color: var(--air-blue); background: var(--air-chip-local-bg); }
-  .air-route-path { font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-      font-size: .82rem; font-weight: 600; color: var(--air-blue); }
-  .air-route-what { font-size: .82rem; color: var(--air-ink); margin-top: .2rem; }
-  .air-route-adds { font-size: .78rem; color: var(--air-muted); margin-top: .25rem; }
+  .air-route {{ border: 1px solid var(--air-line); border-radius: 8px;
+      padding: .5rem .7rem; height: 100%; background: var(--air-bg); }}
+  .air-route.on {{ border-color: var(--air-blue); background: var(--air-chip-local-bg); }}
+  .air-route-path {{ font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: .82rem; font-weight: 600; color: var(--air-blue); }}
+  .air-route-what {{ font-size: .82rem; color: var(--air-ink); margin-top: .2rem; }}
+  .air-route-adds {{ font-size: .78rem; color: var(--air-muted); margin-top: .25rem; }}
 
   /* The status line: method, pill, timings. */
-  .air-statusbar { display: flex; align-items: center; flex-wrap: wrap; gap: .55rem;
-      padding: .6rem .85rem; border: 1px solid var(--air-line); border-radius: 10px;
-      background: var(--air-surface); margin: .5rem 0 .9rem 0; }
-  .air-pill { display: inline-block; padding: .16rem .62rem; border-radius: 999px;
+  .air-statusbar {{ display: flex; align-items: center; flex-wrap: wrap; gap: .5rem;
+      padding: .5rem .7rem; border: 1px solid var(--air-line); border-radius: 8px;
+      background: var(--air-surface); margin: .4rem 0 .7rem 0; }}
+  .air-pill {{ display: inline-block; padding: .16rem .62rem; border-radius: 999px;
       font-size: .78rem; font-weight: 600; letter-spacing: .2px;
-      color: var(--air-pill-ink); }
-  .air-pill.ok { background: var(--air-green); }
-  .air-pill.warn { background: var(--air-amber); }
-  .air-pill.err { background: var(--air-red); }
-  .air-meta { color: var(--air-muted); font-size: .82rem;
-      font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
-  .air-meta strong { color: var(--air-ink); font-weight: 600; }
+      color: var(--air-pill-ink); }}
+  .air-pill.ok {{ background: var(--air-green); }}
+  .air-pill.warn {{ background: var(--air-amber); }}
+  .air-pill.err {{ background: var(--air-red); }}
+  .air-meta {{ color: var(--air-muted); font-size: .82rem;
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }}
+  .air-meta strong {{ color: var(--air-ink); font-weight: 600; }}
 
   /* Inline labels for sentiment/urgency verdicts. */
-  .air-badge { display: inline-block; padding: .2rem .68rem; border-radius: 999px;
-      font-size: .82rem; font-weight: 600; border: 1px solid transparent; }
-  .air-badge.positive { background: var(--air-pos-bg); color: var(--air-green);
-      border-color: var(--air-pos-line); }
-  .air-badge.negative { background: var(--air-neg-bg); color: var(--air-red);
-      border-color: var(--air-neg-line); }
-  .air-badge.neutral  { background: var(--air-neu-bg); color: var(--air-muted);
-      border-color: var(--air-neu-line); }
-  .air-badge.mixed    { background: var(--air-mix-bg); color: var(--air-amber);
-      border-color: var(--air-mix-line); }
-  .air-badge.unknown  { background: var(--air-neu-bg); color: var(--air-muted);
-      border-color: var(--air-neu-line); border-style: dashed; }
+  .air-badge {{ display: inline-block; padding: .2rem .68rem; border-radius: 999px;
+      font-size: .82rem; font-weight: 600; border: 1px solid transparent; }}
+  .air-badge.positive {{ background: var(--air-pos-bg); color: var(--air-green);
+      border-color: var(--air-pos-line); }}
+  .air-badge.negative {{ background: var(--air-neg-bg); color: var(--air-red);
+      border-color: var(--air-neg-line); }}
+  .air-badge.neutral  {{ background: var(--air-neu-bg); color: var(--air-muted);
+      border-color: var(--air-neu-line); }}
+  .air-badge.mixed    {{ background: var(--air-mix-bg); color: var(--air-amber);
+      border-color: var(--air-mix-line); }}
+  .air-badge.unknown  {{ background: var(--air-neu-bg); color: var(--air-muted);
+      border-color: var(--air-neu-line); border-style: dashed; }}
 
-  .air-section { font-size: .74rem; font-weight: 600; letter-spacing: .8px;
-      text-transform: uppercase; color: var(--air-muted); margin: 1.15rem 0 .4rem 0; }
+  .air-section {{ font-size: .74rem; font-weight: 600; letter-spacing: .8px;
+      text-transform: uppercase; color: var(--air-muted); margin: .9rem 0 .35rem 0; }}
 
   /* A quiet note for things that are not errors but need saying. */
-  .air-note { border-left: 3px solid var(--air-line); padding: .1rem 0 .1rem .7rem;
-      color: var(--air-muted); font-size: .86rem; margin: .3rem 0 .8rem 0; }
+  .air-note {{ border-left: 3px solid var(--air-line); padding: .1rem 0 .1rem .7rem;
+      color: var(--air-muted); font-size: .86rem; margin: .3rem 0 .7rem 0; }}
+
+  /* ── Data grid — dashboard.py's one component for structured API output ──
+     A bordered stat panel: a header bar, then dense rows of `key value`
+     pairs in monospace. Colour is reserved for state actually worth a second
+     look (dashboard.py's Kind), not for routinely differentiating every
+     label — the opposite instinct from `.air-badge` above, deliberately. */
+  .air-grid {{ border: 1px solid var(--air-line); border-radius: 6px;
+      overflow: hidden; margin: 0 0 .6rem 0; background: var(--air-bg); }}
+  .air-grid-head {{ background: var(--air-surface); padding: .3rem .65rem;
+      font-size: .68rem; font-weight: 700; letter-spacing: .8px;
+      text-transform: uppercase; color: var(--air-muted);
+      border-bottom: 1px solid var(--air-line); }}
+  /* `.standalone` labels a table section that has no `.air-grid` box of its
+     own around it — same typography, its own rounded top so it still reads
+     as a panel header sitting directly above the `st.dataframe` it titles. */
+  .air-grid-head.standalone {{ border: 1px solid var(--air-line); border-bottom: none;
+      border-radius: 6px 6px 0 0; margin: .6rem 0 0 0; }}
+  .air-grid-row {{ display: flex; flex-wrap: wrap; align-items: baseline; gap: 1.3rem;
+      padding: .38rem .65rem; border-bottom: 1px solid var(--air-line); }}
+  .air-grid-row:last-child {{ border-bottom: none; }}
+  .air-grid-empty {{ padding: .5rem .65rem; color: var(--air-muted);
+      font-size: .82rem; font-style: italic; }}
+  .air-grid-kv {{ display: inline-flex; align-items: baseline; gap: .4rem; white-space: nowrap; }}
+  .air-grid-k {{ font-family: {_FONT_MONO}; font-size: .72rem; color: var(--air-muted); }}
+  .air-grid-v {{ font-family: {_FONT_MONO}; font-size: .82rem; font-weight: 600;
+      color: var(--air-ink); }}
+  .air-grid-v.ok {{ color: var(--air-green); }}
+  .air-grid-v.warn {{ color: var(--air-amber); }}
+  .air-grid-v.err {{ color: var(--air-red); }}
+  .air-grid-v.muted {{ color: var(--air-muted); font-weight: 400; }}
 
   /* Monospace anywhere a payload or identifier appears. */
-  .stCodeBlock, code { font-size: .82rem; }
-  section[data-testid="stSidebar"] { border-right: 1px solid var(--air-line); }
-  section[data-testid="stSidebar"] .block-container { padding-top: 1.4rem; }
+  .stCodeBlock, code {{ font-size: .82rem; }}
+  section[data-testid="stSidebar"] {{ border-right: 1px solid var(--air-line); }}
+  section[data-testid="stSidebar"] .block-container {{ padding-top: 1rem; }}
 """
 
 
@@ -267,9 +351,15 @@ def resolve_mode(default: str) -> str:
 
 
 def inject(mode: str = "auto") -> None:
-    """Emit the stylesheet for ``mode``."""
+    """Emit the stylesheet for ``mode``.
+
+    ``_FONT_IMPORT`` has to lead the block — an ``@import`` anywhere else in the
+    stylesheet is simply dropped by the CSS spec, not deprioritised.
+    """
     chrome = "" if mode == "auto" else _CHROME
-    st.markdown(f"<style>{_roots(mode)}{chrome}{_STATIC}</style>", unsafe_allow_html=True)
+    st.markdown(
+        f"<style>{_FONT_IMPORT}{_roots(mode)}{chrome}{_STATIC}</style>", unsafe_allow_html=True
+    )
 
 
 def header(title: str, subtitle: str) -> None:

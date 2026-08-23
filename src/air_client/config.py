@@ -22,6 +22,8 @@ Spelling in `.env`::
     AIR_CLIENT__TARGETS__QA__CLASSIFIER_API_KEY=airc_...
     AIR_CLIENT__TARGETS__QA__PLATFORM_BASE_URL=https://platform.qa.example
     AIR_CLIENT__TARGETS__QA__PLATFORM_API_KEY=
+    AIR_CLIENT__TARGETS__QA__LLM_BASE_URL=https://llm.qa.example
+    AIR_CLIENT__TARGETS__QA__LLM_API_KEY=
 
 The flat ``AIR_CLIENT__CLASSIFIER_BASE_URL`` style still works and is read as an
 override of the built-in ``local`` target.
@@ -34,6 +36,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urlparse
 
+from air_client.currency import DEFAULT_USD_TO_INR_RATE
+
 ENV_PREFIX = "AIR_CLIENT__"
 TARGETS_PREFIX = f"{ENV_PREFIX}TARGETS__"
 
@@ -41,7 +45,8 @@ TARGETS_PREFIX = f"{ENV_PREFIX}TARGETS__"
 LOCAL_TARGET_NAME = "local"
 
 # Ports come from the AIR port map in air-infra/README.md, which reserves
-# 8080-8089 for services: 8080 air-infra, 8081 air-platform, 8082 air-classifier.
+# 8080-8089 for services: 8080 air-infra, 8081 air-platform, 8082 air-classifier,
+# 8083 air-llm (see LOCAL_LLM_BASE_URL below, sourced from air-llm's own compose file).
 LOCAL_CLASSIFIER_BASE_URL = "http://127.0.0.1:8082"
 LOCAL_PLATFORM_BASE_URL = "http://127.0.0.1:8081"
 
@@ -51,6 +56,28 @@ LOCAL_PLATFORM_BASE_URL = "http://127.0.0.1:8081"
 #: authenticated path as every remote environment, so a key handling bug
 #: surfaces here instead of the first time someone points at QA.
 LOCAL_CLASSIFIER_API_KEY = "airc_local_dev_key"
+
+#: air-platform's two development keys, from its own `.env.example`.
+#:
+#: The channel is a property of the *key*, never of the request — air-platform
+#: says so explicitly, and enforces it: the customer key on `/v1/query` is a 403,
+#: and so is the business key on `/v1/chat`. One key could therefore only ever
+#: drive half the service, which is why the console carries both.
+LOCAL_PLATFORM_CUSTOMER_KEY = "airp_local_customer_key"
+LOCAL_PLATFORM_BUSINESS_KEY = "airp_local_business_key"
+
+#: air-llm's own `docker-compose.yml` maps host port 8083 — "the next free slot
+#: in the AIR port block" per its own comment (8080 air-infra, 8081
+#: air-platform, 8082 air-classifier) — the same convention the other two
+#: LOCAL_*_BASE_URL constants above already follow: the compose-mapped host
+#: port, not the raw in-container one (air-llm listens on 8080 inside its own
+#: container, same as air-infra does inside its).
+LOCAL_LLM_BASE_URL = "http://127.0.0.1:8083"
+
+#: air-llm's own `.env.example` provisions this exact token for air-client
+#: (`AIR_LLM_SECURITY__SERVICE_TOKENS=...,air-client-dev:air-client`), so a
+#: local checkout of both projects authenticates with no edits on either side.
+LOCAL_LLM_API_KEY = "air-client-dev"
 
 #: Hosts that mean "this machine". Anything else is treated as remote and is
 #: flagged as such everywhere the console shows a URL.
@@ -63,6 +90,10 @@ _TARGET_FIELDS = frozenset(
         "CLASSIFIER_API_KEY",
         "PLATFORM_BASE_URL",
         "PLATFORM_API_KEY",
+        "PLATFORM_CUSTOMER_API_KEY",
+        "PLATFORM_BUSINESS_API_KEY",
+        "LLM_BASE_URL",
+        "LLM_API_KEY",
     }
 )
 
@@ -86,7 +117,7 @@ def _load_dotenv() -> None:
         os.environ.setdefault(key.strip(), value.strip())
 
 
-def _get(name: str, default: str) -> str:
+def _get(name: str, default: str = "") -> str:
     value = os.environ.get(f"{ENV_PREFIX}{name}")
     return value.strip() if value and value.strip() else default
 
@@ -133,16 +164,27 @@ class Target:
     classifier_base_url: str
     classifier_api_key: str
     platform_base_url: str
-    platform_api_key: str
+    #: One key per channel. `/v1/chat` accepts only the customer key and
+    #: `/v1/query` only the business one, so both travel with the target.
+    platform_customer_key: str
+    platform_business_key: str
+    #: air-llm needs only one key — unlike air-platform it has no channel split,
+    #: just the same single `X-API-Key` shape air-classifier already uses.
+    llm_base_url: str = ""
+    llm_api_key: str = ""
 
     @property
     def location(self) -> str:
-        """The stronger of the two services' locations — remote wins.
+        """The strongest of the three services' locations — remote wins.
 
         A target with one remote leg is a remote target for warning purposes,
-        even if the other leg is still pointing at localhost.
+        even if the other legs are still pointing at localhost.
         """
-        legs = {location_of(self.classifier_base_url), location_of(self.platform_base_url)}
+        legs = {
+            location_of(self.classifier_base_url),
+            location_of(self.platform_base_url),
+            location_of(self.llm_base_url),
+        }
         if "remote" in legs:
             return "remote"
         if "local" in legs:
@@ -161,6 +203,9 @@ class Defaults:
     #: Appearance at start-up: ``auto`` (follow the OS), ``light`` or ``dark``.
     #: Validated by :func:`air_client.theme.resolve_mode`, which owns the modes.
     theme: str
+    #: Illustrative USD→INR conversion for cost figures — see `currency.py`.
+    #: Not a live rate; the sidebar can override it for the session.
+    usd_to_inr_rate: float
 
     @property
     def selected_target(self) -> Target:
@@ -195,7 +240,17 @@ def _build_local(fields: dict[str, str]) -> Target:
         or _get("CLASSIFIER_API_KEY", LOCAL_CLASSIFIER_API_KEY),
         platform_base_url=fields.get("PLATFORM_BASE_URL")
         or _get("PLATFORM_BASE_URL", LOCAL_PLATFORM_BASE_URL),
-        platform_api_key=fields.get("PLATFORM_API_KEY") or _get("PLATFORM_API_KEY", ""),
+        # `PLATFORM_API_KEY` predates the split and is read as the customer key,
+        # so a `.env` written before air-platform grew its second channel keeps
+        # working instead of silently losing its credential.
+        platform_customer_key=fields.get("PLATFORM_CUSTOMER_API_KEY")
+        or fields.get("PLATFORM_API_KEY")
+        or _get("PLATFORM_CUSTOMER_API_KEY")
+        or _get("PLATFORM_API_KEY", LOCAL_PLATFORM_CUSTOMER_KEY),
+        platform_business_key=fields.get("PLATFORM_BUSINESS_API_KEY")
+        or _get("PLATFORM_BUSINESS_API_KEY", LOCAL_PLATFORM_BUSINESS_KEY),
+        llm_base_url=fields.get("LLM_BASE_URL") or _get("LLM_BASE_URL", LOCAL_LLM_BASE_URL),
+        llm_api_key=fields.get("LLM_API_KEY") or _get("LLM_API_KEY", LOCAL_LLM_API_KEY),
     )
 
 
@@ -214,7 +269,11 @@ def load_defaults() -> Defaults:
             classifier_base_url=fields.get("CLASSIFIER_BASE_URL", ""),
             classifier_api_key=fields.get("CLASSIFIER_API_KEY", ""),
             platform_base_url=fields.get("PLATFORM_BASE_URL", ""),
-            platform_api_key=fields.get("PLATFORM_API_KEY", ""),
+            platform_customer_key=fields.get("PLATFORM_CUSTOMER_API_KEY")
+            or fields.get("PLATFORM_API_KEY", ""),
+            platform_business_key=fields.get("PLATFORM_BUSINESS_API_KEY", ""),
+            llm_base_url=fields.get("LLM_BASE_URL", ""),
+            llm_api_key=fields.get("LLM_API_KEY", ""),
         )
 
     selected = _get("TARGET", LOCAL_TARGET_NAME).lower()
@@ -229,4 +288,5 @@ def load_defaults() -> Defaults:
         timeout_seconds=_get_float("TIMEOUT_SECONDS", 60.0),
         verify_tls=_get_bool("VERIFY_TLS", True),
         theme=_get("THEME", "auto").lower(),
+        usd_to_inr_rate=_get_float("USD_TO_INR_RATE", DEFAULT_USD_TO_INR_RATE),
     )

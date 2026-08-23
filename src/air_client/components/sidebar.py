@@ -19,6 +19,7 @@ import streamlit as st
 from air_client import theme
 from air_client.config import Defaults, Target, location_of
 from air_client.connection import Connection
+from air_client.theme import note
 
 #: Widget keys the target switcher rewrites. Session state is the single source
 #: of truth for these; the widgets below are declared with `key` and no `value`
@@ -27,7 +28,10 @@ FIELD_KEYS = (
     "classifier_base_url",
     "classifier_api_key",
     "platform_base_url",
-    "platform_api_key",
+    "platform_customer_key",
+    "platform_business_key",
+    "llm_base_url",
+    "llm_api_key",
 )
 
 _SEEDED = "connection-seeded"
@@ -38,7 +42,10 @@ def _fields_of(target: Target) -> dict[str, str]:
         "classifier_base_url": target.classifier_base_url,
         "classifier_api_key": target.classifier_api_key,
         "platform_base_url": target.platform_base_url,
-        "platform_api_key": target.platform_api_key,
+        "platform_customer_key": target.platform_customer_key,
+        "platform_business_key": target.platform_business_key,
+        "llm_base_url": target.llm_base_url,
+        "llm_api_key": target.llm_api_key,
     }
 
 
@@ -50,6 +57,7 @@ def _seed(defaults: Defaults) -> None:
     st.session_state.update(_fields_of(defaults.selected_target))
     st.session_state.setdefault("timeout_seconds", defaults.timeout_seconds)
     st.session_state.setdefault("verify_tls", defaults.verify_tls)
+    st.session_state.setdefault("usd_to_inr_rate", defaults.usd_to_inr_rate)
     st.session_state[_SEEDED] = True
 
 
@@ -86,6 +94,12 @@ def _location_caption(base_url: str) -> None:
         st.caption(":grey[no base URL set]")
 
 
+def _key_caption(state_key: str, route: str) -> None:
+    """Say which route a missing key disables, rather than just 'no key'."""
+    if not str(st.session_state.get(state_key, "")).strip():
+        st.caption(f":red[no key set] · `{route}` will return 401")
+
+
 def _appearance_note(mode: str) -> None:
     """Say so when an explicit choice disagrees with Streamlit's own theme.
 
@@ -107,8 +121,8 @@ def _appearance_note(mode: str) -> None:
     )
 
 
-def render(defaults: Defaults) -> tuple[Connection, Connection]:
-    """Draw the sidebar; return the classifier and platform connections."""
+def render(defaults: Defaults) -> tuple[Connection, Connection, Connection, Connection]:
+    """Draw the sidebar; return classifier, platform-customer, platform-business, llm."""
     _seed(defaults)
 
     with st.sidebar:
@@ -168,7 +182,45 @@ def render(defaults: Defaults) -> tuple[Connection, Connection]:
         st.markdown("**air-platform**")
         st.text_input("Base URL", key="platform_base_url")
         _location_caption(str(st.session_state.get("platform_base_url", "")))
-        st.text_input("X-API-Key", key="platform_api_key", type="password")
+        note(
+            "Two channels, one engine. The channel comes from the **key**, not a "
+            "header — so each route needs its own."
+        )
+        st.text_input(
+            "X-API-Key · customer",
+            key="platform_customer_key",
+            type="password",
+            help="Drives `POST /v1/chat`. A local checkout accepts `airp_local_customer_key`.",
+        )
+        _key_caption("platform_customer_key", "/v1/chat")
+        st.text_input(
+            "X-API-Key · business",
+            key="platform_business_key",
+            type="password",
+            help="Drives `POST /v1/query`. A local checkout accepts `airp_local_business_key`.",
+        )
+        _key_caption("platform_business_key", "/v1/query")
+
+        st.divider()
+
+        st.markdown("**air-llm**")
+        st.text_input(
+            "Base URL",
+            key="llm_base_url",
+            help="No trailing path — the console appends /v1/… itself.",
+        )
+        _location_caption(str(st.session_state.get("llm_base_url", "")))
+        st.text_input(
+            "X-API-Key",
+            key="llm_api_key",
+            type="password",
+            help=(
+                "Sent as `X-API-Key`. A local checkout of air-llm accepts "
+                "`air-client-dev`, which is what `local` is preloaded with."
+            ),
+        )
+        if not str(st.session_state.get("llm_api_key", "")).strip():
+            st.caption(":red[no key set] · authenticated routes will return 401")
 
         st.divider()
 
@@ -188,6 +240,18 @@ def render(defaults: Defaults) -> tuple[Connection, Connection]:
                 "Verify TLS certificates",
                 key="verify_tls",
                 help="Turn off only for a self-signed staging endpoint.",
+            )
+            st.number_input(
+                "USD → INR rate",
+                min_value=1.0,
+                max_value=500.0,
+                step=0.5,
+                key="usd_to_inr_rate",
+                help=(
+                    "Every AIR service bills and reports cost in USD; this is only a "
+                    "display conversion for the ₹ figure shown alongside it, not a live "
+                    "rate. Preset it with `AIR_CLIENT__USD_TO_INR_RATE` in `.env`."
+                ),
             )
 
         st.divider()
@@ -217,6 +281,20 @@ def render(defaults: Defaults) -> tuple[Connection, Connection]:
     seconds = float(st.session_state["timeout_seconds"])
     check_tls = bool(st.session_state["verify_tls"])
 
+    platform_url = str(st.session_state["platform_base_url"]).strip()
+
+    def platform(channel: str, state_key: str) -> Connection:
+        return Connection(
+            service="air-platform",
+            target=target.name,
+            target_label=target.label,
+            base_url=platform_url,
+            api_key=str(st.session_state[state_key]),
+            timeout=seconds,
+            verify=check_tls,
+            channel=channel,
+        )
+
     return (
         Connection(
             service="air-classifier",
@@ -227,12 +305,14 @@ def render(defaults: Defaults) -> tuple[Connection, Connection]:
             timeout=seconds,
             verify=check_tls,
         ),
+        platform("customer", "platform_customer_key"),
+        platform("business", "platform_business_key"),
         Connection(
-            service="air-platform",
+            service="air-llm",
             target=target.name,
             target_label=target.label,
-            base_url=str(st.session_state["platform_base_url"]).strip(),
-            api_key=str(st.session_state["platform_api_key"]),
+            base_url=str(st.session_state["llm_base_url"]).strip(),
+            api_key=str(st.session_state["llm_api_key"]),
             timeout=seconds,
             verify=check_tls,
         ),
