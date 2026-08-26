@@ -103,7 +103,12 @@ def render(
         _problem_detail(exchange.response_json)
 
     tab_names = ["Response", "Headers", "Request"]
-    show_summary = summary is not None and exchange.ok and exchange.response_json is not None
+    # A streamed exchange has no single `response_json` — its content is
+    # `events` instead — so it needs its own arm of this gate. Every other tab
+    # never sets `is_stream`, so this changes nothing for them.
+    show_summary = summary is not None and exchange.ok and (
+        exchange.response_json is not None or (exchange.is_stream and exchange.events)
+    )
     if show_summary:
         tab_names.insert(0, "Summary")
 
@@ -113,7 +118,11 @@ def render(
     if show_summary:
         with tabs[0]:
             assert summary is not None
-            summary(exchange.response_json)
+            # The stream case hands the whole Exchange to the summary callback
+            # rather than a bare payload — folding `events` into a display
+            # shape is domain-specific (a TurnResult's shape, not this
+            # generic component's concern), so the caller decides how.
+            summary(exchange if exchange.is_stream else exchange.response_json)
         cursor = 1
 
     with tabs[cursor]:
